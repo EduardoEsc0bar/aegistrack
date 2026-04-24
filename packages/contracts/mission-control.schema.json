@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AegisTrack Mission Control Contracts",
+  "type": "object",
+  "properties": {
+    "telemetryUpdate": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "telemetry.update" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "asset_id": { "type": "string" },
+        "position": {
+          "type": "object",
+          "properties": {
+            "lat": { "type": "number" },
+            "lon": { "type": "number" },
+            "alt": { "type": "number" }
+          },
+          "required": ["lat", "lon", "alt"]
+        },
+        "velocity": {
+          "type": "object",
+          "properties": {
+            "heading_deg": { "type": "number" },
+            "speed_mps": { "type": "number" }
+          },
+          "required": ["heading_deg", "speed_mps"]
+        },
+        "track": {
+          "type": "object",
+          "properties": {
+            "confidence": { "type": "number" },
+            "classification": { "type": "string" }
+          },
+          "required": ["confidence", "classification"]
+        },
+        "alerts": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["type", "timestamp", "asset_id", "position", "velocity", "track", "alerts"]
+    },
+    "playbackState": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["live", "playback"] },
+        "is_running": { "type": "boolean" },
+        "current_time": { "type": ["string", "null"], "format": "date-time" },
+        "start_time": { "type": ["string", "null"], "format": "date-time" },
+        "end_time": { "type": ["string", "null"], "format": "date-time" },
+        "source": { "type": "string" }
+      },
+      "required": ["mode", "is_running", "current_time", "start_time", "end_time", "source"]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+build/
+.vscode/
+*.log
+results/
+logs/
+*.o
+*.a
+*.so
+*.dylib
+
+# Generated files
+build/
+apps/web/node_modules/
+apps/web/.next/
+apps/api/.venv/
+logs/

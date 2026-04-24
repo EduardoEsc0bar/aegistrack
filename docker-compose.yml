@@ -1,0 +1,81 @@
+version: "3.9"
+
+services:
+  aegistrack_core:
+    profiles: ["core"]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    working_dir: /workspace
+    command:
+      - ./build/run_sim
+      - --ticks
+      - "250000"
+      - --targets
+      - "8"
+      - --hz
+      - "20"
+      - --enable_eoir
+      - "1"
+      - --enable_eoir_updates
+      - "1"
+      - --enable_logging
+      - "1"
+      - --log_path
+      - /workspace/logs/mission_control.jsonl
+      - --profile_every
+      - "100"
+    volumes:
+      - ./logs:/workspace/logs
+      - ./results:/workspace/results
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aegistrack}
+      POSTGRES_USER: ${POSTGRES_USER:-aegistrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegistrack}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: ./apps/api
+    environment:
+      AEGISTRACK_API_ENV: docker
+      AEGISTRACK_API_DATABASE_URL: postgresql+psycopg://aegistrack:aegistrack@postgres:5432/aegistrack
+      AEGISTRACK_API_REDIS_URL: redis://redis:6379/0
+      AEGISTRACK_API_LOG_PATH: /workspace/logs/mission_control.jsonl
+      AEGISTRACK_API_PROFILE_PATH: /workspace/results/profile.json
+      AEGISTRACK_API_ALLOWED_ORIGINS: http://localhost:3000
+      AEGISTRACK_API_AUTO_SEED: "true"
+      AEGISTRACK_API_ENABLE_FILE_BRIDGE: "true"
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/workspace:ro
+
+  web:
+    build:
+      context: ./apps/web
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      NEXT_PUBLIC_WS_BASE_URL: ws://localhost:8000
+      NEXT_PUBLIC_CESIUM_BASE_URL: /cesium
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:

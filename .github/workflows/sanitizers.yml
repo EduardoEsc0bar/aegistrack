@@ -1,0 +1,22 @@
+name: Sanitizers
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  asan-ubsan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (ASAN+UBSAN)
+        run: cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug -DAEGISTRACK_ASAN=ON -DAEGISTRACK_UBSAN=ON
+
+      - name: Build
+        run: cmake --build build-sanitize -j
+
+      - name: Test
+        run: ctest --test-dir build-sanitize --output-on-failure

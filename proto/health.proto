@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package aegistrack.telemetry.v1;
+
+import "common.proto";
+
+message HealthPing {
+  Header header = 1;
+  uint64 sensor_id = 2;
+  double cpu_pct = 3;
+  double mem_mb = 4;
+}
+
+message HealthPong {
+  Header header = 1;
+  string status = 2;
+}
+
+service HealthService {
+  rpc Heartbeat(stream HealthPing) returns (stream HealthPong);
+}

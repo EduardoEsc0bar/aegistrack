@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package aegistrack.telemetry.v1;
+
+message Header {
+  uint64 seq = 1;
+  double t_meas_s = 2;
+  double t_sent_s = 3;
+  string source_id = 4;
+  string frame_id = 5;
+}
+
+message Vector3 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}

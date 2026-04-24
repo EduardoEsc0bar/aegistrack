@@ -1,0 +1,124 @@
+version: "3.9"
+
+services:
+  run_cluster_demo:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aegistrack:latest
+    working_dir: /workspace
+    command:
+      - ./build/run_cluster_demo
+      - --bind_addr
+      - 0.0.0.0:50052
+      - --ticks
+      - "200000"
+      - --hz
+      - "20"
+    expose:
+      - "50052"
+
+  telemetry_ingest:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aegistrack:latest
+    working_dir: /workspace
+    command:
+      - ./build/telemetry_ingest
+      - --bind_addr
+      - 0.0.0.0:50051
+      - --forward_addr
+      - run_cluster_demo:50052
+      - --log_every_batches
+      - "100"
+    depends_on:
+      - run_cluster_demo
+    ports:
+      - "50051:50051"
+
+  sensor_node_1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aegistrack:latest
+    working_dir: /workspace
+    command:
+      - ./build/sensor_node
+      - --ingest_addr
+      - telemetry_ingest:50051
+      - --sensor_id
+      - "101"
+      - --seed
+      - "11"
+      - --target_offset_x
+      - "0"
+      - --ticks
+      - "200000"
+    depends_on:
+      - telemetry_ingest
+
+  sensor_node_2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aegistrack:latest
+    working_dir: /workspace
+    command:
+      - ./build/sensor_node
+      - --ingest_addr
+      - telemetry_ingest:50051
+      - --sensor_id
+      - "102"
+      - --seed
+      - "22"
+      - --target_offset_x
+      - "120"
+      - --ticks
+      - "200000"
+    depends_on:
+      - telemetry_ingest
+
+  sensor_node_3:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aegistrack:latest
+    working_dir: /workspace
+    command:
+      - ./build/sensor_node
+      - --ingest_addr
+      - telemetry_ingest:50051
+      - --sensor_id
+      - "103"
+      - --seed
+      - "33"
+      - --target_offset_x
+      - "240"
+      - --ticks
+      - "200000"
+    depends_on:
+      - telemetry_ingest
+
+  sensor_node:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aegistrack:latest
+    working_dir: /workspace
+    command:
+      - ./build/sensor_node
+      - --ingest_addr
+      - telemetry_ingest:50051
+      - --sensor_id
+      - "200"
+      - --seed
+      - "200"
+      - --target_offset_x
+      - "360"
+      - --ticks
+      - "200000"
+    depends_on:
+      - telemetry_ingest
+    profiles:
+      - scale

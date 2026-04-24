@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package aegistrack.telemetry.v1;
+
+import "detections.proto";
+
+message Ack {
+  uint64 batches_received = 1;
+}
+
+service TelemetryIngestService {
+  rpc StreamDetections(stream DetectionBatch) returns (Ack);
+}

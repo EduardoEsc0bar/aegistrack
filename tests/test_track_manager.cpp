@@ -1,0 +1,116 @@
+#include <cmath>
+#include <vector>
+
+#include <doctest/doctest.h>
+
+#include "common/angles.h"
+#include "fusion_core/track_manager.h"
+
+namespace sensor_fusion::fusion_core {
+namespace {
+
+sensor_fusion::Measurement make_meas(double range,
+                                     double bearing,
+                                     double confidence = 0.9,
+                                     double range_var = 1.0,
+                                     double bearing_var = 0.01,
+                                     double t = 0.0) {
+  return sensor_fusion::Measurement{
+      .t_meas = sensor_fusion::Timestamp::from_seconds(t),
+      .t_sent = sensor_fusion::Timestamp::from_seconds(t),
+      .sensor_id = sensor_fusion::SensorId(1),
+      .sensor_type = sensor_fusion::SensorType::Radar,
+      .measurement_type = sensor_fusion::MeasurementType::RangeBearing2D,
+      .z = {range, bearing},
+      .R_rowmajor = {range_var, 0.0, 0.0, bearing_var},
+      .z_dim = 2,
+      .confidence = confidence,
+      .snr = 0.0,
+  };
+}
+
+}  // namespace
+
+TEST_CASE("track manager: creates track from measurement") {
+  TrackManager manager(TrackManagerConfig{});
+
+  manager.predict_all(0.1);
+  const auto snapshot = manager.update_with_measurements({make_meas(100.0, 0.0)});
+
+  CHECK(snapshot.size() == 1);
+  CHECK(snapshot[0].status() == TrackStatus::Tentative);
+  CHECK(snapshot[0].quality().hits == 1);
+}
+
+TEST_CASE("track manager: confirms after N hits") {
+  TrackManagerConfig cfg;
+  cfg.confirm_hits = 3;
+  TrackManager manager(cfg);
+
+  for (uint32_t i = 0; i < cfg.confirm_hits; ++i) {
+    manager.predict_all(0.1);
+    manager.update_with_measurements({make_meas(100.0, 0.0, 0.9, 4.0, 0.01)});
+  }
+
+  CHECK(manager.tracks().size() == 1);
+  CHECK(manager.tracks()[0].status() == TrackStatus::Confirmed);
+}
+
+TEST_CASE("track manager: deletes after misses") {
+  TrackManagerConfig cfg;
+  cfg.delete_misses = 4;
+  TrackManager manager(cfg);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0)});
+
+  for (uint32_t i = 0; i < cfg.delete_misses; ++i) {
+    manager.predict_all(0.1);
+    manager.update_with_measurements({});
+  }
+
+  CHECK(manager.tracks().empty());
+}
+
+TEST_CASE("track manager: gating rejects bad measurement") {
+  TrackManagerConfig cfg;
+  cfg.gate_mahalanobis2 = 9.21;
+  TrackManager manager(cfg);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0, 0.9, 1.0, 0.001)});
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(300.0, deg_to_rad(90.0), 0.1, 0.01, 0.0001)});
+
+  CHECK(manager.tracks().size() == 1);
+  CHECK(manager.tracks()[0].quality().misses == 1);
+}
+
+TEST_CASE("track manager: nearest neighbor uniqueness") {
+  TrackManagerConfig cfg;
+  cfg.confirm_hits = 10;
+  TrackManager manager(cfg);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0), make_meas(200.0, 0.0)});
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements(
+      {make_meas(101.0, 0.01, 0.9, 2.0, 0.01), make_meas(199.0, -0.01, 0.9, 2.0, 0.01)});
+
+  CHECK(manager.tracks().size() == 2);
+
+  const auto& t0 = manager.tracks()[0];
+  const auto& t1 = manager.tracks()[1];
+  CHECK(t0.quality().hits == 2);
+  CHECK(t1.quality().hits == 2);
+  CHECK(t0.quality().misses == 0);
+  CHECK(t1.quality().misses == 0);
+
+  CHECK(t0.filter().state()(0) < t1.filter().state()(0));
+  CHECK(std::abs(t0.filter().state()(0) - 101.0) < std::abs(t0.filter().state()(0) - 199.0));
+  CHECK(std::abs(t1.filter().state()(0) - 199.0) < std::abs(t1.filter().state()(0) - 101.0));
+}
+
+}  // namespace sensor_fusion::fusion_core
