@@ -4,6 +4,7 @@ import {
   BtEventTraceReplayEvent,
   BtNodeTraceReplayEvent,
   CommandReplayEvent,
+  DemoMetadataReplayEvent,
   DecisionReplayEvent,
   FaultReplayEvent,
   InterceptReplayEvent,
@@ -33,7 +34,8 @@ const knownEventTypes: ReadonlySet<string> = new Set<ReplayKnownEventType>([
   "intercept_event",
   "interceptor_state",
   "bt_decision",
-  "fault_event"
+  "fault_event",
+  "demo_metadata"
 ]);
 
 export function parseReplayJsonl(text: string): ReplayDataset {
@@ -214,6 +216,16 @@ function toReplayEvent(raw: JsonObject, lineNumber: number, originalIndex: numbe
         type,
         fault: asString(raw.fault)
       } satisfies FaultReplayEvent;
+    case "demo_metadata":
+      return {
+        ...meta,
+        type,
+        mission_name: asString(raw.mission_name),
+        duration_s: asNumber(raw.duration_s),
+        track_count: asNumber(raw.track_count),
+        interceptor_count: asNumber(raw.interceptor_count),
+        fault_profile: asString(raw.fault_profile)
+      } satisfies DemoMetadataReplayEvent;
     default:
       return {
         ...meta,

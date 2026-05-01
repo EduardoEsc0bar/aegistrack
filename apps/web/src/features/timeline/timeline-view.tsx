@@ -3,6 +3,7 @@
 import { AppShell } from "@/components/app-shell";
 import { PlaybackControls } from "@/components/playback-controls";
 import { ReplayFoundationStatus } from "@/components/replay-foundation-status";
+import { ReplayMissionView } from "@/components/replay/replay-mission-view";
 import { StatusBadge } from "@/components/status-badge";
 import { TimelineChart } from "@/components/timeline-chart";
 import { useMissionControlData } from "@/hooks/use-mission-control-data";
@@ -16,7 +17,8 @@ export function TimelineView() {
       title="Mission Timeline"
       subtitle="Playback-centric event stream adapted from AegisTrack track, decision, assignment, and intercept outputs."
     >
-      <section className="grid gap-6 xl:grid-cols-[1fr_320px]">
+      <ReplayMissionView />
+      <section className="mt-6 grid gap-6 xl:grid-cols-[1fr_320px]">
         <div className="space-y-6">
           <TimelineChart events={events.data ?? []} />
           <div className="rounded-2xl border border-line bg-panel/85 p-5">

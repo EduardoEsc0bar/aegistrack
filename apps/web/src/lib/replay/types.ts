@@ -18,7 +18,8 @@ export type ReplayKnownEventType =
   | "intercept_event"
   | "interceptor_state"
   | "bt_decision"
-  | "fault_event";
+  | "fault_event"
+  | "demo_metadata";
 
 export type ReplayEventType = ReplayKnownEventType | "unknown";
 
@@ -150,6 +151,15 @@ export type FaultReplayEvent = ReplayEventMeta & {
   fault: string | null;
 };
 
+export type DemoMetadataReplayEvent = ReplayEventMeta & {
+  type: "demo_metadata";
+  mission_name: string | null;
+  duration_s: number | null;
+  track_count: number | null;
+  interceptor_count: number | null;
+  fault_profile: string | null;
+};
+
 export type UnknownReplayEvent = ReplayEventMeta & {
   type: "unknown";
   originalType: string;
@@ -166,6 +176,7 @@ export type ReplayEvent =
   | InterceptorStateReplayEvent
   | BtDecisionReplayEvent
   | FaultReplayEvent
+  | DemoMetadataReplayEvent
   | UnknownReplayEvent;
 
 export type ReplayParseError = {

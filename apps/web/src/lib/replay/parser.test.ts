@@ -46,13 +46,14 @@ not-json
   it("normalizes sample duration and groups BT decisions", () => {
     const dataset = parseReplayJsonl(sampleMissionJsonl);
 
-    expect(dataset.startTimeS).toBe(0.05);
-    expect(dataset.endTimeS).toBe(0.35);
-    expect(dataset.durationS).toBeCloseTo(0.3);
-    expect(dataset.btDecisions).toHaveLength(1);
-    expect(dataset.assignments).toHaveLength(1);
-    expect(dataset.trackStabilityEvents).toHaveLength(1);
-    expect(getEventsAtOrBefore(dataset, 0.1).length).toBeGreaterThan(1);
+    expect(dataset.startTimeS).toBe(0.0);
+    expect(dataset.endTimeS).toBe(8.0);
+    expect(dataset.durationS).toBeCloseTo(8.0);
+    expect(dataset.eventsByType.demo_metadata).toHaveLength(1);
+    expect(dataset.btDecisions).toHaveLength(10);
+    expect(dataset.assignments).toHaveLength(5);
+    expect(dataset.trackStabilityEvents.length).toBeGreaterThanOrEqual(10);
+    expect(getEventsAtOrBefore(dataset, 0.0).length).toBeGreaterThan(10);
   });
 
   it("loads sample text into the replay store", () => {
@@ -60,7 +61,7 @@ not-json
     const state = useReplayStore.getState();
 
     expect(dataset.events.length).toBeGreaterThan(0);
-    expect(state.dataset?.btDecisions).toHaveLength(1);
+    expect(state.dataset?.btDecisions).toHaveLength(10);
     expect(state.currentTimeS).toBe(dataset.startTimeS);
     expect(state.isPlaying).toBe(false);
   });
