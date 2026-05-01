@@ -1,8 +1,24 @@
 #include "decision/decision_engine.h"
 
-#include <cmath>
+#include "decision/blackboard.h"
+#include "decision/mission_behavior_tree.h"
 
 namespace sensor_fusion::decision {
+namespace {
+
+TrackFact make_track_fact(const sensor_fusion::fusion_core::Track& track,
+                          const std::array<double, 3>& target_pos) {
+  return TrackFact{
+      .track_id = track.id(),
+      .status = track.status(),
+      .position = target_pos,
+      .confidence = track.quality().confidence,
+      .score = track.quality().score,
+      .priority = track.quality().score,
+  };
+}
+
+}  // namespace
 
 DecisionEngine::DecisionEngine(double engage_score_threshold)
     : config_(DecisionConfig{
@@ -21,70 +37,22 @@ DecisionEvent DecisionEngine::decide(
     const std::array<double, 3>& target_pos,
     const std::function<void(sensor_fusion::TrackId, const std::array<double, 3>&)>&
         assign_action) const {
-  if (track.status() == sensor_fusion::fusion_core::TrackStatus::Tentative) {
-    return DecisionEvent{
-        .track_id = track.id(),
-        .decision_type = "acquire",
-        .reason = "tentative_wait",
-    };
-  }
+  MissionBlackboard blackboard;
+  blackboard.set_tracks({make_track_fact(track, target_pos)});
+  blackboard.set_interceptors({InterceptorFact{
+      .interceptor_id = 1,
+      .available = interceptor_available,
+      .engaged = !interceptor_available,
+      .target_id = sensor_fusion::TrackId(0),
+      .position = {0.0, 0.0, 0.0},
+  }});
 
-  if (track.status() != sensor_fusion::fusion_core::TrackStatus::Confirmed) {
-    return DecisionEvent{
-        .track_id = track.id(),
-        .decision_type = "idle",
-        .reason = "track_not_confirmed",
-    };
+  MissionBehaviorTree tree(config_);
+  const BtTickResult result = tree.tick(blackboard);
+  for (const auto& command : result.engagement_commands) {
+    assign_action(command.track_id, command.target_position);
   }
-
-  if (track.quality().score <= config_.engage_score_threshold) {
-    return DecisionEvent{
-        .track_id = track.id(),
-        .decision_type = "idle",
-        .reason = "score_below_threshold",
-    };
-  }
-
-  if (track.quality().confidence < config_.min_confidence_to_engage) {
-    return DecisionEvent{
-        .track_id = track.id(),
-        .decision_type = "engage_denied",
-        .reason = "low_confidence",
-    };
-  }
-
-  const double range = std::sqrt(target_pos[0] * target_pos[0] + target_pos[1] * target_pos[1] +
-                                 target_pos[2] * target_pos[2]);
-  if (range < config_.no_engage_zone_radius_m) {
-    return DecisionEvent{
-        .track_id = track.id(),
-        .decision_type = "engage_denied",
-        .reason = "inside_no_engage_zone",
-    };
-  }
-
-  if (range > config_.max_engagement_range_m) {
-    return DecisionEvent{
-        .track_id = track.id(),
-        .decision_type = "engage_denied",
-        .reason = "outside_max_engagement_range",
-    };
-  }
-
-  if (!interceptor_available) {
-    return DecisionEvent{
-        .track_id = track.id(),
-        .decision_type = "engage_denied",
-        .reason = "interceptor_unavailable",
-    };
-  }
-
-  assign_action(track.id(), target_pos);
-  return DecisionEvent{
-      .track_id = track.id(),
-      .decision_type = "engage",
-      .reason = "safety_checks_passed",
-  };
+  return result.event;
 }
 
 const DecisionConfig& DecisionEngine::config() const {

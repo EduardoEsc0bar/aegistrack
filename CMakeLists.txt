@@ -153,7 +153,9 @@ add_executable(run_sim
   src/agents/interceptor/interceptor.cpp
   src/agents/interceptor/interceptor_manager.cpp
   src/decision/assignment.cpp
+  src/decision/blackboard.cpp
   src/decision/decision_engine.cpp
+  src/decision/mission_behavior_tree.cpp
   src/decision/threat_scoring.cpp
   src/tools/run_sim.cpp
   src/common/fixed_rate_loop.cpp
@@ -212,7 +214,9 @@ target_link_libraries(sensor_node PRIVATE proto_lib)
 add_executable(run_cluster_demo
   src/tools/run_cluster_demo.cpp
   src/agents/interceptor/interceptor.cpp
+  src/decision/blackboard.cpp
   src/decision/decision_engine.cpp
+  src/decision/mission_behavior_tree.cpp
   src/services/telemetry_ingest/conversion.cpp
   src/services/telemetry_ingest/ingest_pipeline.cpp
   src/services/telemetry_ingest/telemetry_ingest_service.cpp
@@ -293,6 +297,8 @@ target_include_directories(run_profile PRIVATE src ${eigen_SOURCE_DIR})
 
 add_executable(run_replay
   src/tools/run_replay.cpp
+  src/decision/blackboard.cpp
+  src/decision/mission_behavior_tree.cpp
   src/common/covariance_checks.cpp
   src/common/math_checks.cpp
   src/common/time.cpp
@@ -310,7 +316,9 @@ add_executable(run_incident_replay
   src/tools/run_incident_replay.cpp
   src/tools/incident_replay.cpp
   src/agents/interceptor/interceptor.cpp
+  src/decision/blackboard.cpp
   src/decision/decision_engine.cpp
+  src/decision/mission_behavior_tree.cpp
   src/common/covariance_checks.cpp
   src/common/math_checks.cpp
   src/common/time.cpp
@@ -326,6 +334,7 @@ target_include_directories(run_incident_replay PRIVATE src ${eigen_SOURCE_DIR})
 
 add_executable(tests
   tests/test_assignment.cpp
+  tests/test_blackboard.cpp
   tests/test_behavior_tree.cpp
   tests/test_conversion.cpp
   tests/test_health_stale.cpp
@@ -348,6 +357,7 @@ add_executable(tests
   tests/test_measurement_buffer.cpp
   tests/test_messages_and_bus.cpp
   tests/test_metrics_csv.cpp
+  tests/test_mission_behavior_tree.cpp
   tests/test_radar_sensor.cpp
   tests/test_replay_determinism.cpp
   tests/test_realtime_reserves.cpp
@@ -364,7 +374,9 @@ add_executable(tests
   src/agents/interceptor/interceptor.cpp
   src/agents/interceptor/interceptor_manager.cpp
   src/decision/assignment.cpp
+  src/decision/blackboard.cpp
   src/decision/decision_engine.cpp
+  src/decision/mission_behavior_tree.cpp
   src/decision/threat_scoring.cpp
   src/services/telemetry_ingest/conversion.cpp
   src/services/telemetry_ingest/ingest_pipeline.cpp

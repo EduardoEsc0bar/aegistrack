@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 #include "decision/decision_engine.h"
+#include "decision/mission_behavior_tree.h"
 
 namespace sensor_fusion::observability {
 namespace {
@@ -388,6 +389,39 @@ std::string serialize_assignment_event_json(const sensor_fusion::Timestamp& t,
       << "\"decision_type\":\"" << decision_type << "\","
       << "\"reason\":\"" << reason << "\""
       << serialize_common_trace_fields(trace_id, causal_parent_id) << "}";
+  return out.str();
+}
+
+std::string serialize_bt_decision_json(const sensor_fusion::Timestamp& t,
+                                       const sensor_fusion::decision::BtTickResult& result,
+                                       uint64_t trace_id,
+                                       uint64_t causal_parent_id) {
+  std::ostringstream out;
+  out << std::setprecision(17);
+  out << "{"
+      << "\"type\":\"bt_decision\","
+      << "\"t_s\":" << t.to_seconds() << ","
+      << "\"tick\":" << result.tick << ","
+      << "\"mode\":\"" << sensor_fusion::decision::mission_mode_to_string(result.mode)
+      << "\","
+      << "\"track_id\":" << result.event.track_id.value << ","
+      << "\"decision_type\":\"" << result.event.decision_type << "\","
+      << "\"reason\":\"" << result.event.reason << "\","
+      << "\"engagement_commands\":" << result.engagement_commands.size() << ","
+      << "\"nodes\":[";
+  for (size_t i = 0; i < result.node_trace.size(); ++i) {
+    if (i > 0) {
+      out << ",";
+    }
+    const auto& trace = result.node_trace[i];
+    out << "{"
+        << "\"node\":\"" << trace.node << "\","
+        << "\"status\":\"" << sensor_fusion::decision::bt_status_to_string(trace.status)
+        << "\","
+        << "\"detail\":\"" << trace.detail << "\""
+        << "}";
+  }
+  out << "]" << serialize_common_trace_fields(trace_id, causal_parent_id) << "}";
   return out.str();
 }
 

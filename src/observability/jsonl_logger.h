@@ -11,6 +11,7 @@
 
 namespace sensor_fusion::decision {
 struct DecisionEvent;
+struct BtTickResult;
 }
 
 namespace sensor_fusion::observability {
@@ -97,5 +98,10 @@ std::string serialize_assignment_event_json(const sensor_fusion::Timestamp& t,
                                             const std::string& reason,
                                             uint64_t trace_id = 0,
                                             uint64_t causal_parent_id = 0);
+
+std::string serialize_bt_decision_json(const sensor_fusion::Timestamp& t,
+                                       const sensor_fusion::decision::BtTickResult& result,
+                                       uint64_t trace_id = 0,
+                                       uint64_t causal_parent_id = 0);
 
 }  // namespace sensor_fusion::observability

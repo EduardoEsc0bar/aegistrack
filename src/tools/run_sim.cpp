@@ -20,8 +20,8 @@
 #include "common/fixed_rate_loop.h"
 #include "common/rng.h"
 #include "common/tick_profiler.h"
-#include "decision/assignment.h"
-#include "decision/decision_engine.h"
+#include "decision/blackboard.h"
+#include "decision/mission_behavior_tree.h"
 #include "decision/threat_scoring.h"
 #include "faults/fault_injector.h"
 #include "fusion_core/measurement_buffer.h"
@@ -356,13 +356,31 @@ int main(int argc, char** argv) {
       },
       &metrics);
 
-  sensor_fusion::decision::DecisionEngine decision_engine(sensor_fusion::decision::DecisionConfig{
+  sensor_fusion::decision::MissionBehaviorTree mission_tree(sensor_fusion::decision::DecisionConfig{
       .engage_score_threshold = options.engage_score_threshold,
       .max_engagement_range_m = options.max_engagement_range_m,
       .min_confidence_to_engage = options.min_confidence_to_engage,
       .no_engage_zone_radius_m = options.no_engage_zone_radius_m,
       .engagement_timeout_s = options.engagement_timeout_s,
   });
+  sensor_fusion::decision::MissionBlackboard mission_blackboard;
+  std::vector<sensor_fusion::decision::SensorHealthFact> sensor_health = {
+      sensor_fusion::decision::SensorHealthFact{
+          .sensor_id = sensor_fusion::SensorId(1),
+          .active = true,
+          .stale = false,
+          .last_seen_age_s = 0.0,
+      },
+  };
+  if (options.enable_eoir != 0) {
+    sensor_health.push_back(sensor_fusion::decision::SensorHealthFact{
+        .sensor_id = sensor_fusion::SensorId(2),
+        .active = true,
+        .stale = false,
+        .last_seen_age_s = 0.0,
+    });
+  }
+  mission_blackboard.set_sensor_health(std::move(sensor_health));
 
   sensor_fusion::agents::InterceptorManager interceptor_manager(
       build_interceptors(std::max(0, options.interceptors), options.interceptor_speed));
@@ -502,48 +520,32 @@ int main(int argc, char** argv) {
 
     size_t tentative_count = 0;
     size_t confirmed_count = 0;
-    std::vector<sensor_fusion::decision::AssignmentTrack> assignment_tracks;
+    std::vector<sensor_fusion::decision::TrackFact> blackboard_tracks;
     std::vector<std::pair<sensor_fusion::TrackId, std::array<double, 3>>> confirmed_positions;
 
     for (const auto& track : snapshot) {
       if (track.status() == sensor_fusion::fusion_core::TrackStatus::Tentative) {
         ++tentative_count;
       }
-      if (track.status() != sensor_fusion::fusion_core::TrackStatus::Confirmed) {
-        continue;
-      }
 
-      ++confirmed_count;
       const auto x = track.filter().state();
       const std::array<double, 3> pos = {x(0), x(1), x(2)};
-      confirmed_positions.emplace_back(track.id(), pos);
-
       const double threat = sensor_fusion::decision::compute_threat_score(track);
-      metrics.observe("threat_score", threat);
-      metrics.inc("threats_confirmed_total");
+      blackboard_tracks.push_back(sensor_fusion::decision::TrackFact{
+          .track_id = track.id(),
+          .status = track.status(),
+          .position = pos,
+          .confidence = track.quality().confidence,
+          .score = track.quality().score,
+          .priority = threat,
+      });
 
-      bool allowed = false;
-      const auto safety_event = decision_engine.decide(
-          track, true, pos,
-          [&](sensor_fusion::TrackId, const std::array<double, 3>&) { allowed = true; });
-      if (safety_event.decision_type == "engage") {
-        assignment_tracks.push_back(sensor_fusion::decision::AssignmentTrack{
-            .track_id = track.id(),
-            .position = pos,
-            .threat_score = threat,
-        });
-      } else if (safety_event.decision_type == "engage_denied") {
-        const uint64_t parent = last_track_event_trace_by_track.contains(track.id().value)
-                                    ? last_track_event_trace_by_track[track.id().value]
-                                    : 0;
-        const uint64_t trace = alloc_trace_id();
-        metrics.inc("engage_denied_total");
-        emit_line(event_time,
-                  sensor_fusion::observability::serialize_assignment_event_json(
-                      event_time, 0, track.id(), "engage_denied", safety_event.reason, trace,
-                      parent));
+      if (track.status() == sensor_fusion::fusion_core::TrackStatus::Confirmed) {
+        ++confirmed_count;
+        confirmed_positions.emplace_back(track.id(), pos);
+        metrics.observe("threat_score", threat);
+        metrics.inc("threats_confirmed_total");
       }
-      (void)allowed;
     }
 
     std::unordered_map<uint64_t, std::array<double, 3>> confirmed_pos_by_track;
@@ -562,38 +564,45 @@ int main(int argc, char** argv) {
     interceptor_manager.update_track_positions(confirmed_positions);
 
     if (options.enable_interceptor != 0) {
-      const auto assignment_decisions = sensor_fusion::decision::compute_assignments(
-          interceptor_manager.states(), assignment_tracks,
-          sensor_fusion::decision::AssignmentConfig{
-              .allow_multi_engage = options.allow_multi_engage != 0,
-              .retask_enable = options.retask_enable != 0,
-              .commit_distance_m = options.commit_distance_m,
-          });
-
-      std::vector<std::pair<uint64_t, sensor_fusion::TrackId>> assignments;
-      assignments.reserve(assignment_decisions.size());
-      for (const auto& decision : assignment_decisions) {
-        assignments.emplace_back(decision.interceptor_id, decision.track_id);
-        metrics.inc("assignments_total");
-        if (decision.action == sensor_fusion::decision::AssignmentAction::Retasked) {
-          metrics.inc("retasks_total");
-        }
-
-        const uint64_t parent = last_track_event_trace_by_track.contains(decision.track_id.value)
-                                    ? last_track_event_trace_by_track[decision.track_id.value]
-                                    : 0;
-        const uint64_t trace = alloc_trace_id();
-        const std::string action =
-            decision.action == sensor_fusion::decision::AssignmentAction::Retasked
-                ? "engage_retasked"
-                : "engage_assigned";
+      mission_blackboard.set_tick(static_cast<uint64_t>(i + 1), generator.t_seconds());
+      mission_blackboard.set_tracks(std::move(blackboard_tracks));
+      mission_blackboard.set_interceptors_from_states(interceptor_manager.states());
+      const sensor_fusion::decision::BtTickResult bt_result =
+          mission_tree.tick(mission_blackboard);
+      emit_line(event_time, sensor_fusion::observability::serialize_bt_decision_json(
+                                event_time, bt_result, alloc_trace_id(), 0));
+      metrics.inc("bt_ticks_total");
+      metrics.inc(std::string("bt_mode_") +
+                  sensor_fusion::decision::mission_mode_to_string(bt_result.mode));
+      if (bt_result.event.decision_type == "engage_denied") {
+        metrics.inc("engage_denied_total");
+        const uint64_t parent =
+            last_track_event_trace_by_track.contains(bt_result.event.track_id.value)
+                ? last_track_event_trace_by_track[bt_result.event.track_id.value]
+                : 0;
         emit_line(event_time,
                   sensor_fusion::observability::serialize_assignment_event_json(
-                      event_time, decision.interceptor_id, decision.track_id, action,
-                      "global_assignment", trace, parent));
+                      event_time, 0, bt_result.event.track_id, "engage_denied",
+                      bt_result.event.reason, alloc_trace_id(), parent));
+      }
 
-        engagement_by_interceptor[decision.interceptor_id] =
-            EngagementInfo{.track_id = decision.track_id, .start_time_s = generator.t_seconds()};
+      std::vector<std::pair<uint64_t, sensor_fusion::TrackId>> assignments;
+      assignments.reserve(bt_result.engagement_commands.size());
+      for (const auto& command : bt_result.engagement_commands) {
+        assignments.emplace_back(command.interceptor_id, command.track_id);
+        metrics.inc("assignments_total");
+
+        const uint64_t parent = last_track_event_trace_by_track.contains(command.track_id.value)
+                                    ? last_track_event_trace_by_track[command.track_id.value]
+                                    : 0;
+        const uint64_t trace = alloc_trace_id();
+        emit_line(event_time,
+                  sensor_fusion::observability::serialize_assignment_event_json(
+                      event_time, command.interceptor_id, command.track_id, "engage_assigned",
+                      command.reason, trace, parent));
+
+        engagement_by_interceptor[command.interceptor_id] =
+            EngagementInfo{.track_id = command.track_id, .start_time_s = generator.t_seconds()};
       }
 
       interceptor_manager.assign(assignments);
@@ -620,6 +629,7 @@ int main(int argc, char** argv) {
       interceptor_manager.handle_intercepts(hits);
 
       for (const auto& [interceptor_id, track_id] : hits) {
+        mission_blackboard.clear_engagement();
         metrics.inc("successful_intercepts_total");
         metrics.inc("kills_total");
 
@@ -647,6 +657,7 @@ int main(int argc, char** argv) {
             });
 
         if (!still_engaged) {
+          mission_blackboard.clear_engagement();
           if ((generator.t_seconds() - it->second.start_time_s) > options.engagement_timeout_s) {
             metrics.inc("intercept_fail_total");
           }

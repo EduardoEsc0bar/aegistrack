@@ -247,3 +247,5 @@ Each week ends with **Exit Criteria** that must be met.
 - Decision: multi-agent coordination uses threat-scored Hungarian assignment with commit-point-based retasking and one-to-one deconfliction by default — set
 - Decision: realtime instrumentation now uses per-tick profiling (`TickProfiler`), deadline miss metrics, and allocation-growth tracking (`vector_growth_events_total`) with `run_profile` JSON output — set
 - Decision: optional SFML-based 2D visualizer integrated behind `--enable_viz` with headless fallback when SFML is unavailable — set
+- Decision: the mission-control globe now uses offline Cesium Natural Earth imagery with an immersive HUD layout so the web view reads closer to a real-world ISR operations display while staying local-first — set
+- Decision: autonomous mission logic now runs through `MissionBehaviorTree` over a shared `MissionBlackboard`; the active flow is search → track/acquire → engage with deterministic BT node JSONL logging — set
