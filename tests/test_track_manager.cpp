@@ -1,10 +1,13 @@
 #include <cmath>
+#include <string>
 #include <vector>
 
 #include <doctest/doctest.h>
 
 #include "common/angles.h"
 #include "fusion_core/track_manager.h"
+#include "observability/jsonl_logger.h"
+#include "observability/metrics.h"
 
 namespace sensor_fusion::fusion_core {
 namespace {
@@ -72,6 +75,57 @@ TEST_CASE("track manager: deletes after misses") {
   CHECK(manager.tracks().empty());
 }
 
+TEST_CASE("track manager: lifetime and deletion metrics are recorded") {
+  TrackManagerConfig cfg;
+  cfg.delete_misses = 2;
+  sensor_fusion::observability::Metrics metrics;
+  TrackManager manager(cfg, &metrics);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0)});
+
+  for (uint32_t i = 0; i < cfg.delete_misses; ++i) {
+    manager.predict_all(0.1);
+    manager.update_with_measurements({});
+  }
+
+  const auto snapshot = metrics.snapshot();
+  CHECK(snapshot.counters.at("tracks_deleted_total") == 1);
+  CHECK(snapshot.counters.at("track_coasts_total") == 2);
+  REQUIRE(snapshot.observations.count("track_lifetime_ticks") == 1);
+  CHECK(snapshot.observations.at("track_lifetime_ticks").count == 1);
+  CHECK(snapshot.observations.at("track_lifetime_ticks").max == doctest::Approx(3.0));
+}
+
+TEST_CASE("track manager: fragmentation warning increments when new track replaces deleted track") {
+  TrackManagerConfig cfg;
+  cfg.confirm_hits = 1;
+  cfg.delete_misses = 1;
+  cfg.fragmentation_warning_distance_m = 25.0;
+  cfg.fragmentation_recent_delete_window_ticks = 3;
+  sensor_fusion::observability::Metrics metrics;
+  TrackManager manager(cfg, &metrics);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0)});
+  REQUIRE(manager.tracks().size() == 1);
+  CHECK(manager.tracks()[0].status() == TrackStatus::Confirmed);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({});
+  CHECK(manager.tracks().empty());
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(101.0, 0.0)});
+
+  const auto& deltas = manager.last_deltas();
+  REQUIRE(deltas.fragmentation_warnings.size() == 1);
+  CHECK(deltas.fragmentation_warnings[0].new_track_id == sensor_fusion::TrackId(2));
+  const auto snapshot = metrics.snapshot();
+  CHECK(snapshot.counters.at("track_fragmentation_warnings_total") == 1);
+  CHECK(snapshot.counters.at("possible_id_switch_total") == 1);
+}
+
 TEST_CASE("track manager: gating rejects bad measurement") {
   TrackManagerConfig cfg;
   cfg.gate_mahalanobis2 = 9.21;
@@ -85,6 +139,48 @@ TEST_CASE("track manager: gating rejects bad measurement") {
 
   CHECK(manager.tracks().size() == 1);
   CHECK(manager.tracks()[0].quality().misses == 1);
+}
+
+TEST_CASE("track manager: accepted and rejected association mahalanobis metrics are separated") {
+  TrackManagerConfig cfg;
+  cfg.gate_mahalanobis2 = 9.21;
+  sensor_fusion::observability::Metrics metrics;
+  TrackManager manager(cfg, &metrics);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0, 0.9, 1.0, 0.001)});
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(101.0, 0.0, 0.9, 1.0, 0.001)});
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(300.0, deg_to_rad(90.0), 0.9, 0.01, 0.0001)});
+
+  const auto snapshot = metrics.snapshot();
+  REQUIRE(snapshot.observations.count("assoc_accepted_mahalanobis2") == 1);
+  REQUIRE(snapshot.observations.count("assoc_rejected_mahalanobis2") == 1);
+  CHECK(snapshot.observations.at("assoc_accepted_mahalanobis2").count >= 1);
+  CHECK(snapshot.observations.at("assoc_rejected_mahalanobis2").count >= 1);
+  CHECK(snapshot.counters.at("assoc_gated_out_measurements") >= 1);
+}
+
+TEST_CASE("track stability JSONL includes compact lifecycle fields") {
+  TrackManager manager(TrackManagerConfig{});
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0)});
+  REQUIRE(manager.tracks().size() == 1);
+
+  const std::string line =
+      sensor_fusion::observability::serialize_track_stability_event_json(
+          sensor_fusion::Timestamp::from_seconds(0.1), "track_created", manager.tracks()[0],
+          "test_reason", sensor_fusion::TrackId(7), 12.5, 99, 0);
+
+  CHECK(line.find("\"type\":\"track_stability_event\"") != std::string::npos);
+  CHECK(line.find("\"event\":\"track_created\"") != std::string::npos);
+  CHECK(line.find("\"track_id\":1") != std::string::npos);
+  CHECK(line.find("\"age_ticks\":1") != std::string::npos);
+  CHECK(line.find("\"related_track_id\":7") != std::string::npos);
+  CHECK(line.find("\"distance_m\":12.5") != std::string::npos);
 }
 
 TEST_CASE("track manager: nearest neighbor uniqueness") {

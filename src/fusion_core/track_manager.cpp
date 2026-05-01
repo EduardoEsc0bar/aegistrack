@@ -51,6 +51,40 @@ bool measurement_to_bearing_elevation(const sensor_fusion::Measurement& m,
   return true;
 }
 
+std::array<double, 3> track_position(const Track& track) {
+  const auto x = track.filter().state();
+  return {x(0), x(1), x(2)};
+}
+
+double distance3(const std::array<double, 3>& a, const std::array<double, 3>& b) {
+  const double dx = a[0] - b[0];
+  const double dy = a[1] - b[1];
+  const double dz = a[2] - b[2];
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+void observe_gate_metric(sensor_fusion::observability::Metrics* metrics,
+                         const GateResult& gate) {
+  if (metrics == nullptr) {
+    return;
+  }
+  if (gate.numerical_issue) {
+    metrics->inc("nonfinite_detected_total");
+  }
+  if (!std::isfinite(gate.mahalanobis2)) {
+    return;
+  }
+
+  metrics->observe("mahal", gate.mahalanobis2);
+  metrics->observe("assoc_candidate_mahalanobis2", gate.mahalanobis2);
+  if (gate.pass) {
+    metrics->observe("assoc_passed_gate_mahalanobis2", gate.mahalanobis2);
+  } else {
+    metrics->inc("assoc_gated_out_measurements");
+    metrics->observe("assoc_rejected_mahalanobis2", gate.mahalanobis2);
+  }
+}
+
 }  // namespace
 
 TrackManager::TrackManager(TrackManagerConfig cfg,
@@ -80,8 +114,12 @@ void TrackManager::predict_all(double dt) {
 std::vector<Track> TrackManager::update_with_measurements(
     const std::vector<sensor_fusion::Measurement>& meas_batch) {
   last_tick_deltas_.created.clear();
+  last_tick_deltas_.confirmed.clear();
   last_tick_deltas_.updated.clear();
+  last_tick_deltas_.coasted.clear();
   last_tick_deltas_.deleted.clear();
+  last_tick_deltas_.fragmentation_warnings.clear();
+  age_recently_deleted_tracks();
 
   const size_t track_count_before = tracks_.size();
 
@@ -145,9 +183,20 @@ std::vector<Track> TrackManager::update_with_measurements(
     ++radar_updates;
   }
 
+  if (metrics_ != nullptr) {
+    for (const double mahalanobis2 : matched_mahalanobis2) {
+      metrics_->observe("assoc_accepted_mahalanobis2", mahalanobis2);
+    }
+  }
+
   for (size_t i = 0; i < track_count_before; ++i) {
     if (!track_assigned_scratch_[i]) {
       tracks_[i].mark_miss();
+      last_tick_deltas_.coasted.push_back(tracks_[i]);
+      if (metrics_ != nullptr) {
+        metrics_->inc("track_coasts_total");
+        metrics_->observe("track_coast_misses", static_cast<double>(tracks_[i].quality().misses));
+      }
     }
   }
 
@@ -168,6 +217,7 @@ std::vector<Track> TrackManager::update_with_measurements(
     }
 
     Track created = make_track_from_first_meas(meas_batch[meas_index]);
+    record_fragmentation_warning_if_needed(created);
     last_tick_deltas_.created.push_back(created);
 
     tracks_.push_back(std::move(created));
@@ -194,15 +244,7 @@ std::vector<Track> TrackManager::update_with_measurements(
       for (size_t track_index = 0; track_index < tracks_.size(); ++track_index) {
         const GateResult gate = gate_bearing_elevation(
             tracks_[track_index].filter(), bearing, elevation, R, cfg_.gate_mahal_eoir);
-
-        if (metrics_ != nullptr) {
-          if (gate.numerical_issue) {
-            metrics_->inc("nonfinite_detected_total");
-          }
-          if (std::isfinite(gate.mahalanobis2)) {
-            metrics_->observe("mahal", gate.mahalanobis2);
-          }
-        }
+        observe_gate_metric(metrics_, gate);
 
         if (gate.pass && gate.mahalanobis2 < best_mahal2) {
           best_mahal2 = gate.mahalanobis2;
@@ -248,6 +290,14 @@ std::vector<Track> TrackManager::update_with_measurements(
                   static_cast<uint64_t>(track_count_before - radar_updates));
     metrics_->inc("assoc_unassigned_meas",
                   static_cast<uint64_t>(radar_indices_scratch_.size() - radar_updates));
+    metrics_->inc("assoc_unassigned_measurements",
+                  static_cast<uint64_t>(radar_indices_scratch_.size() - radar_updates));
+
+    const double assoc_success_rate =
+        track_count_before == 0
+            ? 0.0
+            : static_cast<double>(radar_updates) / static_cast<double>(track_count_before);
+    metrics_->set_gauge("assoc_success_rate", assoc_success_rate);
 
     metrics_->inc("radar_updates_total", static_cast<uint64_t>(radar_updates));
     metrics_->inc("eoir_updates_total", static_cast<uint64_t>(eoir_updates));
@@ -255,14 +305,21 @@ std::vector<Track> TrackManager::update_with_measurements(
                   static_cast<uint64_t>(tracks_with_multisensor_updates));
 
     size_t confirmed_count = 0;
+    uint64_t confirmed_age_ticks_sum = 0;
     for (const auto& track : tracks_) {
       if (track.status() == TrackStatus::Confirmed) {
         ++confirmed_count;
+        confirmed_age_ticks_sum += track.quality().age_ticks;
       }
     }
 
     metrics_->set_gauge("tracks_total", static_cast<double>(tracks_.size()));
     metrics_->set_gauge("tracks_confirmed", static_cast<double>(confirmed_count));
+    metrics_->set_gauge(
+        "tracks_confirmed_avg_age_ticks",
+        confirmed_count == 0
+            ? 0.0
+            : static_cast<double>(confirmed_age_ticks_sum) / static_cast<double>(confirmed_count));
   }
 
   return tracks_;
@@ -302,6 +359,50 @@ Track TrackManager::make_track_from_first_meas(const sensor_fusion::Measurement&
   return track;
 }
 
+void TrackManager::age_recently_deleted_tracks() {
+  for (auto& deleted : recently_deleted_tracks_) {
+    if (deleted.remaining_ticks > 0) {
+      --deleted.remaining_ticks;
+    }
+  }
+  recently_deleted_tracks_.erase(
+      std::remove_if(recently_deleted_tracks_.begin(), recently_deleted_tracks_.end(),
+                     [](const RecentlyDeletedTrack& deleted) {
+                       return deleted.remaining_ticks == 0;
+                     }),
+      recently_deleted_tracks_.end());
+}
+
+void TrackManager::record_fragmentation_warning_if_needed(const Track& created) {
+  if (cfg_.fragmentation_warning_distance_m <= 0.0) {
+    return;
+  }
+
+  const auto created_position = track_position(created);
+  for (const auto& deleted : recently_deleted_tracks_) {
+    if (!deleted.was_confirmed) {
+      continue;
+    }
+
+    const double distance_m = distance3(created_position, deleted.position);
+    if (distance_m > cfg_.fragmentation_warning_distance_m) {
+      continue;
+    }
+
+    last_tick_deltas_.fragmentation_warnings.push_back(TrackDeltas::FragmentationWarning{
+        .original_track_id = deleted.track_id,
+        .new_track_id = created.id(),
+        .distance_m = distance_m,
+    });
+    if (metrics_ != nullptr) {
+      metrics_->inc("track_fragmentation_warnings_total");
+      metrics_->inc("possible_id_switch_total");
+      metrics_->observe("track_fragmentation_distance_m", distance_m);
+    }
+    return;
+  }
+}
+
 std::vector<std::pair<size_t, size_t>> TrackManager::associate_nearest_neighbor(
     const std::vector<sensor_fusion::Measurement>& meas_batch,
     const std::vector<size_t>& radar_indices,
@@ -328,14 +429,7 @@ std::vector<std::pair<size_t, size_t>> TrackManager::associate_nearest_neighbor(
 
       const GateResult gate = gate_range_bearing(
           tracks_[track_index].filter(), range, bearing, R, cfg_.gate_mahalanobis2);
-      if (metrics_ != nullptr) {
-        if (gate.numerical_issue) {
-          metrics_->inc("nonfinite_detected_total");
-        }
-        if (std::isfinite(gate.mahalanobis2)) {
-          metrics_->observe("mahal", gate.mahalanobis2);
-        }
-      }
+      observe_gate_metric(metrics_, gate);
       if (gate.pass && gate.mahalanobis2 < best_mahal2) {
         best_mahal2 = gate.mahalanobis2;
         best_k = k;
@@ -379,14 +473,7 @@ std::vector<std::pair<size_t, size_t>> TrackManager::associate_hungarian(
 
       const GateResult gate = gate_range_bearing(
           tracks_[track_index].filter(), range, bearing, R, cfg_.gate_mahalanobis2);
-      if (metrics_ != nullptr) {
-        if (gate.numerical_issue) {
-          metrics_->inc("nonfinite_detected_total");
-        }
-        if (std::isfinite(gate.mahalanobis2)) {
-          metrics_->observe("mahal", gate.mahalanobis2);
-        }
-      }
+      observe_gate_metric(metrics_, gate);
       if (gate.pass) {
         cost[track_index][k] = gate.mahalanobis2;
       }
@@ -421,13 +508,29 @@ std::vector<std::pair<size_t, size_t>> TrackManager::associate_hungarian(
 void TrackManager::apply_lifecycle_rules() {
   for (auto& track : tracks_) {
     if (track.quality().misses >= cfg_.delete_misses) {
+      const bool was_confirmed = track.status() == TrackStatus::Confirmed;
       track.set_status(TrackStatus::Deleted);
       last_tick_deltas_.deleted.push_back(track);
+      recently_deleted_tracks_.push_back(RecentlyDeletedTrack{
+          .track_id = track.id(),
+          .position = track_position(track),
+          .was_confirmed = was_confirmed,
+          .remaining_ticks = cfg_.fragmentation_recent_delete_window_ticks,
+      });
+      if (metrics_ != nullptr) {
+        metrics_->inc("tracks_deleted_total");
+        metrics_->observe("track_lifetime_ticks", static_cast<double>(track.quality().age_ticks));
+        metrics_->observe("track_deleted_misses", static_cast<double>(track.quality().misses));
+      }
       continue;
     }
 
     if (track.status() == TrackStatus::Tentative && track.quality().hits >= cfg_.confirm_hits) {
       track.set_status(TrackStatus::Confirmed);
+      last_tick_deltas_.confirmed.push_back(track);
+      if (metrics_ != nullptr) {
+        metrics_->inc("tracks_confirmed_created_total");
+      }
     }
   }
 

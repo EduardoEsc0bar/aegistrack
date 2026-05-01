@@ -67,6 +67,16 @@ std::string serialize_track_event_json(const std::string& event_type,
                                        uint64_t trace_id = 0,
                                        uint64_t causal_parent_id = 0);
 
+std::string serialize_track_stability_event_json(
+    const sensor_fusion::Timestamp& t,
+    const std::string& event_type,
+    const sensor_fusion::fusion_core::Track& track,
+    const std::string& reason,
+    sensor_fusion::TrackId related_track_id = sensor_fusion::TrackId(0),
+    double distance_m = -1.0,
+    uint64_t trace_id = 0,
+    uint64_t causal_parent_id = 0);
+
 std::string serialize_decision_event_json(const sensor_fusion::Timestamp& t,
                                           const sensor_fusion::decision::DecisionEvent& event,
                                           uint64_t trace_id = 0,

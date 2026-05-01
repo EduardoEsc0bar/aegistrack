@@ -249,3 +249,4 @@ Each week ends with **Exit Criteria** that must be met.
 - Decision: optional SFML-based 2D visualizer integrated behind `--enable_viz` with headless fallback when SFML is unavailable — set
 - Decision: the mission-control globe now uses offline Cesium Natural Earth imagery with an immersive HUD layout so the web view reads closer to a real-world ISR operations display while staying local-first — set
 - Decision: autonomous mission logic now runs through `MissionBehaviorTree` over a shared `MissionBlackboard`; the active flow is search → track/acquire → engage with deterministic BT node JSONL logging — set
+- Decision: tracking diagnostics now separate accepted/rejected Mahalanobis statistics and add track stability counters, lifecycle JSONL events, and fragmentation warnings before algorithm tuning — set

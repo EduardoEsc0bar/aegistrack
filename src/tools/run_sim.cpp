@@ -502,6 +502,19 @@ int main(int argc, char** argv) {
       last_track_event_trace_by_track[track.id().value] = trace_id;
       emit_line(event_time, sensor_fusion::observability::serialize_track_event_json(
                                 "track_created", event_time, track, trace_id, parent));
+      emit_line(event_time,
+                sensor_fusion::observability::serialize_track_stability_event_json(
+                    event_time, "track_created", track, "new_unassigned_measurement",
+                    sensor_fusion::TrackId(0), -1.0, alloc_trace_id(), parent));
+    }
+    for (const auto& track : deltas.confirmed) {
+      const uint64_t trace_id = alloc_trace_id();
+      const uint64_t parent = track.quality().last_trace_id;
+      last_track_event_trace_by_track[track.id().value] = trace_id;
+      emit_line(event_time,
+                sensor_fusion::observability::serialize_track_stability_event_json(
+                    event_time, "track_confirmed", track, "confirm_hits_reached",
+                    sensor_fusion::TrackId(0), -1.0, trace_id, parent));
     }
     for (const auto& track : deltas.updated) {
       const uint64_t trace_id = alloc_trace_id();
@@ -510,16 +523,47 @@ int main(int argc, char** argv) {
       emit_line(event_time, sensor_fusion::observability::serialize_track_event_json(
                                 "track_updated", event_time, track, trace_id, parent));
     }
+    for (const auto& track : deltas.coasted) {
+      const uint64_t parent = last_track_event_trace_by_track.contains(track.id().value)
+                                  ? last_track_event_trace_by_track[track.id().value]
+                                  : track.quality().last_trace_id;
+      emit_line(event_time,
+                sensor_fusion::observability::serialize_track_stability_event_json(
+                    event_time, "track_coasted", track, "missed_radar_update",
+                    sensor_fusion::TrackId(0), -1.0, alloc_trace_id(), parent));
+    }
     for (const auto& track : deltas.deleted) {
       const uint64_t trace_id = alloc_trace_id();
       const uint64_t parent = track.quality().last_trace_id;
       last_track_event_trace_by_track.erase(track.id().value);
       emit_line(event_time, sensor_fusion::observability::serialize_track_event_json(
                                 "track_deleted", event_time, track, trace_id, parent));
+      metrics.observe("track_lifetime_s",
+                      track.quality().age_ticks * std::max(0.0, loop.tick_dt()));
+      emit_line(event_time,
+                sensor_fusion::observability::serialize_track_stability_event_json(
+                    event_time, "track_deleted", track, "delete_misses_reached",
+                    sensor_fusion::TrackId(0), -1.0, alloc_trace_id(), parent));
+    }
+    for (const auto& warning : deltas.fragmentation_warnings) {
+      const auto created_it = std::find_if(
+          deltas.created.begin(), deltas.created.end(),
+          [&](const sensor_fusion::fusion_core::Track& track) {
+            return track.id() == warning.new_track_id;
+          });
+      if (created_it == deltas.created.end()) {
+        continue;
+      }
+      emit_line(event_time,
+                sensor_fusion::observability::serialize_track_stability_event_json(
+                    event_time, "track_fragmentation_warning", *created_it,
+                    "new_track_near_recent_deleted_confirmed_track", warning.original_track_id,
+                    warning.distance_m, alloc_trace_id(), 0));
     }
 
     size_t tentative_count = 0;
     size_t confirmed_count = 0;
+    uint64_t confirmed_age_ticks_sum = 0;
     std::vector<sensor_fusion::decision::TrackFact> blackboard_tracks;
     std::vector<std::pair<sensor_fusion::TrackId, std::array<double, 3>>> confirmed_positions;
 
@@ -542,6 +586,7 @@ int main(int argc, char** argv) {
 
       if (track.status() == sensor_fusion::fusion_core::TrackStatus::Confirmed) {
         ++confirmed_count;
+        confirmed_age_ticks_sum += track.quality().age_ticks;
         confirmed_positions.emplace_back(track.id(), pos);
         metrics.observe("threat_score", threat);
         metrics.inc("threats_confirmed_total");
@@ -556,6 +601,12 @@ int main(int argc, char** argv) {
 
     metrics.set_gauge("tracks_total", static_cast<double>(snapshot.size()));
     metrics.set_gauge("tracks_confirmed", static_cast<double>(confirmed_count));
+    metrics.set_gauge(
+        "tracks_confirmed_avg_age_s",
+        confirmed_count == 0 ? 0.0
+                             : (static_cast<double>(confirmed_age_ticks_sum) /
+                                static_cast<double>(confirmed_count)) *
+                                   std::max(0.0, loop.tick_dt()));
 
     std::cout << "t=" << generator.t_seconds() << " meas=" << combined_ready.size()
               << " tracks=" << snapshot.size() << " tentative=" << tentative_count

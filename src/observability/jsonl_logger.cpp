@@ -299,6 +299,39 @@ std::string serialize_track_event_json(const std::string& event_type,
   return out.str();
 }
 
+std::string serialize_track_stability_event_json(
+    const sensor_fusion::Timestamp& t,
+    const std::string& event_type,
+    const sensor_fusion::fusion_core::Track& track,
+    const std::string& reason,
+    sensor_fusion::TrackId related_track_id,
+    double distance_m,
+    uint64_t trace_id,
+    uint64_t causal_parent_id) {
+  std::ostringstream out;
+  out << std::setprecision(17);
+  out << "{"
+      << "\"type\":\"track_stability_event\","
+      << "\"event\":\"" << event_type << "\","
+      << "\"t_s\":" << t.to_seconds() << ","
+      << "\"track_id\":" << track.id().value << ","
+      << "\"status\":\"" << track_status_to_string(track.status()) << "\","
+      << "\"age_ticks\":" << track.quality().age_ticks << ","
+      << "\"hits\":" << track.quality().hits << ","
+      << "\"misses\":" << track.quality().misses << ","
+      << "\"score\":" << track.quality().score << ","
+      << "\"confidence\":" << track.quality().confidence << ","
+      << "\"reason\":\"" << reason << "\"";
+  if (related_track_id.value != 0) {
+    out << ",\"related_track_id\":" << related_track_id.value;
+  }
+  if (distance_m >= 0.0) {
+    out << ",\"distance_m\":" << distance_m;
+  }
+  out << serialize_common_trace_fields(trace_id, causal_parent_id) << "}";
+  return out.str();
+}
+
 std::string serialize_decision_event_json(const sensor_fusion::Timestamp& t,
                                           const sensor_fusion::decision::DecisionEvent& event,
                                           uint64_t trace_id,
