@@ -2,6 +2,7 @@
 
 import { AppShell } from "@/components/app-shell";
 import { PlaybackControls } from "@/components/playback-controls";
+import { ReplayFoundationStatus } from "@/components/replay-foundation-status";
 import { StatusBadge } from "@/components/status-badge";
 import { TimelineChart } from "@/components/timeline-chart";
 import { useMissionControlData } from "@/hooks/use-mission-control-data";
@@ -37,7 +38,10 @@ export function TimelineView() {
             </div>
           </div>
         </div>
-        <PlaybackControls playback={playback.data} />
+        <div className="space-y-6">
+          <ReplayFoundationStatus />
+          <PlaybackControls playback={playback.data} />
+        </div>
       </section>
     </AppShell>
   );
