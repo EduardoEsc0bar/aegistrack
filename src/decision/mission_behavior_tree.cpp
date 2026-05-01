@@ -1,5 +1,6 @@
 #include "decision/mission_behavior_tree.h"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <optional>
@@ -10,6 +11,7 @@
 #include "decision/condition.h"
 #include "decision/selector.h"
 #include "decision/sequence.h"
+#include "observability/metrics.h"
 
 namespace sensor_fusion::decision {
 namespace {
@@ -40,6 +42,42 @@ bool has_active_engagement_for_target(const BlackboardSnapshot& snapshot,
     }
   }
   return false;
+}
+
+std::optional<TrackFact> find_track(const BlackboardSnapshot& snapshot,
+                                    sensor_fusion::TrackId track_id) {
+  for (const auto& track : snapshot.tracks) {
+    if (track.track_id == track_id &&
+        track.status != sensor_fusion::fusion_core::TrackStatus::Deleted) {
+      return track;
+    }
+  }
+  return std::nullopt;
+}
+
+bool interceptor_engaged_with_track(const BlackboardSnapshot& snapshot,
+                                    uint64_t interceptor_id,
+                                    sensor_fusion::TrackId track_id) {
+  for (const auto& interceptor : snapshot.interceptors) {
+    if (interceptor.interceptor_id == interceptor_id && interceptor.engaged &&
+        interceptor.target_id == track_id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void record_event(TickContext& ctx,
+                  std::string event,
+                  sensor_fusion::TrackId track_id,
+                  uint64_t interceptor_id,
+                  std::string reason) {
+  ctx.result.events.push_back(BtEventTrace{
+      .event = std::move(event),
+      .track_id = track_id,
+      .interceptor_id = interceptor_id,
+      .reason = std::move(reason),
+  });
 }
 
 void record(TickContext& ctx,
@@ -90,9 +128,11 @@ DecisionEvent event_for_track(const TrackFact& track,
 
 }  // namespace
 
-MissionBehaviorTree::MissionBehaviorTree(DecisionConfig config) : config_(config) {}
+MissionBehaviorTree::MissionBehaviorTree(DecisionConfig config,
+                                         sensor_fusion::observability::Metrics* metrics)
+    : config_(config), metrics_(metrics) {}
 
-BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) const {
+BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
   TickContext ctx;
   ctx.snapshot = blackboard.snapshot();
   ctx.result.tick = ctx.snapshot.tick;
@@ -103,6 +143,316 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) const {
       .decision_type = "search",
       .reason = "waiting_for_detections",
   };
+
+  auto active_index_for_track = [&](sensor_fusion::TrackId track_id) -> size_t {
+    for (size_t i = 0; i < memory_.active_engagements.size(); ++i) {
+      if (memory_.active_engagements[i].track_id == track_id) {
+        return i;
+      }
+    }
+    return memory_.active_engagements.size();
+  };
+
+  auto add_or_refresh_active = [&](sensor_fusion::TrackId track_id, uint64_t interceptor_id) {
+    const size_t existing = active_index_for_track(track_id);
+    if (existing < memory_.active_engagements.size()) {
+      memory_.active_engagements[existing].interceptor_id = interceptor_id;
+      return;
+    }
+    memory_.active_engagements.push_back(MissionMemory::ActiveEngagement{
+        .track_id = track_id,
+        .interceptor_id = interceptor_id,
+        .engagement_start_time_s = ctx.snapshot.time_s,
+        .last_command_time_s = ctx.snapshot.time_s,
+    });
+  };
+
+  if (ctx.snapshot.engagement.active) {
+    add_or_refresh_active(ctx.snapshot.engagement.track_id,
+                          ctx.snapshot.engagement.interceptor_id);
+  }
+  for (const auto& interceptor : ctx.snapshot.interceptors) {
+    if (interceptor.engaged && interceptor.target_id.value != 0) {
+      add_or_refresh_active(interceptor.target_id, interceptor.interceptor_id);
+    }
+  }
+
+  std::vector<MissionMemory::TrackStability> next_stability;
+  next_stability.reserve(ctx.snapshot.tracks.size());
+  for (const auto& track : ctx.snapshot.tracks) {
+    if (track.status != sensor_fusion::fusion_core::TrackStatus::Confirmed) {
+      continue;
+    }
+    uint32_t ticks = 1;
+    for (const auto& previous : memory_.stable_tracks) {
+      if (previous.track_id == track.track_id) {
+        ticks = previous.ticks + 1;
+        break;
+      }
+    }
+    next_stability.push_back(MissionMemory::TrackStability{
+        .track_id = track.track_id,
+        .ticks = ticks,
+    });
+  }
+  memory_.stable_tracks = std::move(next_stability);
+
+  auto stable_ticks_for = [&](sensor_fusion::TrackId track_id) -> uint32_t {
+    for (const auto& stable : memory_.stable_tracks) {
+      if (stable.track_id == track_id) {
+        return stable.ticks;
+      }
+    }
+    return 0;
+  };
+
+  auto track_is_stable = [&](sensor_fusion::TrackId track_id) {
+    return stable_ticks_for(track_id) >= config_.stable_track_ticks_to_engage;
+  };
+
+  auto track_is_engaged = [&](sensor_fusion::TrackId track_id) {
+    return active_index_for_track(track_id) < memory_.active_engagements.size();
+  };
+
+  auto track_is_engageable = [&](const TrackFact& track) {
+    if (track.status != sensor_fusion::fusion_core::TrackStatus::Confirmed) {
+      return false;
+    }
+    if (track.score <= config_.engage_score_threshold ||
+        track.confidence < config_.min_confidence_to_engage) {
+      return false;
+    }
+    if (has_stale_required_sensor(ctx.snapshot)) {
+      return false;
+    }
+    const double range = distance_from_origin(track.position);
+    if (range < config_.no_engage_zone_radius_m ||
+        range > config_.max_engagement_range_m) {
+      return false;
+    }
+    if (memory_.last_denied_track_id == track.track_id &&
+        ctx.snapshot.time_s < memory_.denial_cooldown_until_s) {
+      return false;
+    }
+    return track_is_stable(track.track_id);
+  };
+
+  const auto best_confirmed = select_highest_priority_track(ctx.snapshot, true);
+  if (best_confirmed.has_value()) {
+    memory_.stable_track_id = best_confirmed->track_id;
+    memory_.consecutive_track_ticks = stable_ticks_for(best_confirmed->track_id);
+  } else {
+    memory_.stable_track_id = sensor_fusion::TrackId(0);
+    memory_.consecutive_track_ticks = 0;
+  }
+
+  std::vector<InterceptorFact> idle_interceptors;
+  for (const auto& interceptor : ctx.snapshot.interceptors) {
+    if (interceptor.available && !interceptor.engaged) {
+      idle_interceptors.push_back(interceptor);
+    }
+  }
+  ctx.result.idle_interceptor_count = static_cast<uint32_t>(idle_interceptors.size());
+
+  auto finalize = [&](MissionMode mode) {
+    ctx.result.mode = mode;
+    ctx.result.active_engagement_count =
+        static_cast<uint32_t>(memory_.active_engagements.size());
+    if (metrics_ != nullptr) {
+      metrics_->set_gauge("bt_consecutive_track_ticks",
+                          static_cast<double>(memory_.consecutive_track_ticks));
+      metrics_->set_gauge("bt_active_engagements",
+                          static_cast<double>(memory_.active_engagements.size()));
+      metrics_->set_gauge("bt_engaged_targets",
+                          static_cast<double>(memory_.active_engagements.size()));
+      for (const auto& active : memory_.active_engagements) {
+        metrics_->observe("bt_active_engagement_age_s",
+                          std::max(0.0, ctx.snapshot.time_s -
+                                            active.engagement_start_time_s));
+      }
+    }
+    if (mode != memory_.last_mode) {
+      if (metrics_ != nullptr) {
+        metrics_->inc("bt_mode_transition_total");
+      }
+      record_event(ctx, "mode_transition", ctx.result.event.track_id, 0,
+                   std::string(mission_mode_to_string(memory_.last_mode)) + "_to_" +
+                       mission_mode_to_string(mode));
+    }
+    memory_.last_mode = mode;
+    return ctx.result;
+  };
+
+  bool has_stable_unengaged_target = false;
+  for (const auto& track : ctx.snapshot.tracks) {
+    if (!track_is_engaged(track.track_id) && track_is_engageable(track)) {
+      has_stable_unengaged_target = true;
+      break;
+    }
+  }
+
+  bool maintained_engagement = false;
+  for (auto it = memory_.active_engagements.begin();
+       it != memory_.active_engagements.end();) {
+    const auto active_track = find_track(ctx.snapshot, it->track_id);
+    const bool active_interceptor_engaged =
+        interceptor_engaged_with_track(ctx.snapshot, it->interceptor_id, it->track_id);
+
+    if (active_track.has_value() && active_interceptor_engaged) {
+      it->missing_ticks = 0;
+      if (active_track->confidence < config_.min_confidence_to_engage) {
+        ++it->low_confidence_ticks;
+      } else {
+        it->low_confidence_ticks = 0;
+      }
+      maintained_engagement = true;
+      ctx.result.event = event_for_track(*active_track, "engage_maintain",
+                                         "engagement_active");
+      record(ctx, "engage.maintain_engagement", Status::Success,
+             "engagement_state_active");
+      record_event(ctx, "engage_maintain", active_track->track_id,
+                   it->interceptor_id, "engagement_active");
+      if (metrics_ != nullptr) {
+        metrics_->inc("bt_engage_maintain_total");
+        metrics_->inc("bt_duplicate_assignment_suppressed_total");
+      }
+      ++it;
+      continue;
+    }
+
+    ++it->missing_ticks;
+    if (it->missing_ticks >= config_.stable_track_ticks_to_engage) {
+      record_event(ctx, "disengage", it->track_id, it->interceptor_id,
+                   "active_track_or_interceptor_missing");
+      it = memory_.active_engagements.erase(it);
+      blackboard.clear_engagement();
+    } else {
+      ++it;
+    }
+  }
+
+  for (const auto& track : ctx.snapshot.tracks) {
+    if (idle_interceptors.empty()) {
+      break;
+    }
+    if (track_is_engaged(track.track_id) || !track_is_engageable(track)) {
+      continue;
+    }
+
+    const auto interceptor = idle_interceptors.front();
+    idle_interceptors.erase(idle_interceptors.begin());
+    const bool already_had_engagement = !memory_.active_engagements.empty();
+    const std::string event_name =
+        already_had_engagement ? "idle_interceptor_engage" : "engage_start";
+    record(ctx, "engage.target_ready", Status::Success, "confirmed_track_ready");
+    record(ctx, "engage.stability_gate", Status::Success,
+           "stable_ticks_" + std::to_string(stable_ticks_for(track.track_id)));
+    record(ctx, "engage.assign_interceptor", Status::Success, "assignment_emitted");
+    ctx.result.engagement_commands.push_back(EngagementCommand{
+        .interceptor_id = interceptor.interceptor_id,
+        .track_id = track.track_id,
+        .target_position = track.position,
+        .reason = already_had_engagement ? "bt_idle_interceptor_engage"
+                                          : "bt_engage_start",
+    });
+    memory_.active_engagements.push_back(MissionMemory::ActiveEngagement{
+        .track_id = track.track_id,
+        .interceptor_id = interceptor.interceptor_id,
+        .engagement_start_time_s = ctx.snapshot.time_s,
+        .last_command_time_s = ctx.snapshot.time_s,
+    });
+    blackboard.set_engagement(interceptor.interceptor_id, track.track_id);
+    ctx.result.event = event_for_track(track, "engage", event_name);
+    record_event(ctx, event_name, track.track_id, interceptor.interceptor_id,
+                 "idle_interceptor_available");
+    if (metrics_ != nullptr) {
+      metrics_->inc("bt_engage_start_total");
+      if (already_had_engagement) {
+        metrics_->inc("bt_idle_interceptor_engage_total");
+        metrics_->inc("bt_multi_engagement_total");
+      }
+    }
+  }
+  ctx.result.idle_interceptor_count = static_cast<uint32_t>(idle_interceptors.size());
+
+  if (!ctx.result.engagement_commands.empty()) {
+    ++memory_.consecutive_engage_ticks;
+    return finalize(MissionMode::Engage);
+  }
+
+  if (maintained_engagement) {
+    if (idle_interceptors.empty()) {
+      std::optional<TrackFact> retask_candidate;
+      for (const auto& track : ctx.snapshot.tracks) {
+        if (!track_is_engaged(track.track_id) && track_is_engageable(track)) {
+          retask_candidate = track;
+          break;
+        }
+      }
+      if (retask_candidate.has_value() && !memory_.active_engagements.empty()) {
+        size_t weakest_index = memory_.active_engagements.size();
+        double weakest_priority = 0.0;
+        for (size_t i = 0; i < memory_.active_engagements.size(); ++i) {
+          const auto active_track = find_track(ctx.snapshot,
+                                               memory_.active_engagements[i].track_id);
+          if (!active_track.has_value()) {
+            continue;
+          }
+          if (weakest_index == memory_.active_engagements.size() ||
+              active_track->priority < weakest_priority) {
+            weakest_index = i;
+            weakest_priority = active_track->priority;
+          }
+        }
+        if (weakest_index < memory_.active_engagements.size() &&
+            retask_candidate->priority >= weakest_priority + config_.retask_priority_margin) {
+          auto& active = memory_.active_engagements[weakest_index];
+          const uint64_t interceptor_id = active.interceptor_id;
+          ctx.result.engagement_commands.push_back(EngagementCommand{
+              .interceptor_id = interceptor_id,
+              .track_id = retask_candidate->track_id,
+              .target_position = retask_candidate->position,
+              .reason = "bt_retask_priority_margin",
+          });
+          active.track_id = retask_candidate->track_id;
+          active.engagement_start_time_s = ctx.snapshot.time_s;
+          active.last_command_time_s = ctx.snapshot.time_s;
+          active.missing_ticks = 0;
+          active.low_confidence_ticks = 0;
+          blackboard.set_engagement(interceptor_id, retask_candidate->track_id);
+          ctx.result.event =
+              event_for_track(*retask_candidate, "engage", "retask_approved");
+          record(ctx, "engage.retask_policy", Status::Success, "retask_approved");
+          record_event(ctx, "retask_approved", retask_candidate->track_id,
+                       interceptor_id, "priority_margin_exceeded");
+          if (metrics_ != nullptr) {
+            metrics_->inc("bt_retask_approved_total");
+          }
+          ++memory_.consecutive_engage_ticks;
+          return finalize(MissionMode::Engage);
+        }
+        record(ctx, "engage.retask_policy", Status::Failure,
+               "priority_margin_not_exceeded");
+        record_event(ctx, "retask_denied", retask_candidate->track_id, 0,
+                     "priority_margin_not_exceeded");
+        if (metrics_ != nullptr) {
+          metrics_->inc("bt_retask_denied_total");
+        }
+        ctx.result.event.track_id = retask_candidate->track_id;
+        ctx.result.event.reason = "retask_denied";
+      }
+    } else if (has_stable_unengaged_target && metrics_ != nullptr) {
+      metrics_->inc("bt_interceptor_underutilized_ticks");
+    }
+
+    blackboard.set_mode(MissionMode::Engage);
+    ++memory_.consecutive_engage_ticks;
+    return finalize(MissionMode::Engage);
+  }
+
+  if (has_stable_unengaged_target && !idle_interceptors.empty() && metrics_ != nullptr) {
+    metrics_->inc("bt_interceptor_underutilized_ticks");
+  }
 
   auto engage_sequence = std::make_unique<Sequence>();
   engage_sequence->add_child(condition_node(
@@ -124,6 +474,40 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) const {
         return "confirmed_track_ready";
       }));
   engage_sequence->add_child(condition_node(
+      ctx, "engage.denial_cooldown",
+      [&]() {
+        if (!ctx.engage_target.has_value()) {
+          return false;
+        }
+        const bool cooling_down =
+            memory_.last_denied_track_id == ctx.engage_target->track_id &&
+            ctx.snapshot.time_s < memory_.denial_cooldown_until_s;
+        if (cooling_down) {
+          ctx.engagement_denied = true;
+          ctx.result.event =
+              event_for_track(*ctx.engage_target, "track", "engage_cooldown");
+          record_event(ctx, "engage_denied_cooldown", ctx.engage_target->track_id, 0,
+                       memory_.last_denial_reason);
+          if (metrics_ != nullptr) {
+            metrics_->inc("bt_engage_cooldown_total");
+            metrics_->observe("bt_denial_cooldown_s",
+                              memory_.denial_cooldown_until_s - ctx.snapshot.time_s);
+          }
+          return false;
+        }
+        return true;
+      },
+      [&]() -> std::string {
+        if (!ctx.engage_target.has_value()) {
+          return "no_target";
+        }
+        if (memory_.last_denied_track_id == ctx.engage_target->track_id &&
+            ctx.snapshot.time_s < memory_.denial_cooldown_until_s) {
+          return "cooldown_active";
+        }
+        return "cooldown_clear";
+      }));
+  engage_sequence->add_child(condition_node(
       ctx, "engage.confidence_allowed",
       [&]() {
         if (!ctx.engage_target.has_value()) {
@@ -137,7 +521,7 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) const {
         }
         return true;
       },
-      [&]() {
+      [&]() -> std::string {
         if (!ctx.engage_target.has_value()) {
           return "no_target";
         }
@@ -183,7 +567,7 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) const {
         }
         return true;
       },
-      [&]() {
+      [&]() -> std::string {
         if (!ctx.engage_target.has_value()) {
           return "no_target";
         }
@@ -196,7 +580,23 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) const {
         }
         return "range_ok";
       }));
-
+  engage_sequence->add_child(condition_node(
+      ctx, "engage.stability_gate",
+      [&]() {
+        if (!ctx.engage_target.has_value()) {
+          return false;
+        }
+        return memory_.stable_track_id == ctx.engage_target->track_id &&
+               memory_.consecutive_track_ticks >= config_.stable_track_ticks_to_engage;
+      },
+      [&]() -> std::string {
+        if (!ctx.engage_target.has_value()) {
+          return "no_target";
+        }
+        return memory_.stable_track_id == ctx.engage_target->track_id
+                   ? "stable_ticks_" + std::to_string(memory_.consecutive_track_ticks)
+                   : "different_stable_track";
+      }));
   auto active_engagement_sequence = std::make_unique<Sequence>();
   active_engagement_sequence->add_child(condition_node(
       ctx, "engage.active_engagement_exists",
@@ -253,11 +653,21 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) const {
             .interceptor_id = ctx.interceptor->interceptor_id,
             .track_id = ctx.engage_target->track_id,
             .target_position = ctx.engage_target->position,
-            .reason = "bt_engage_target",
+            .reason = "bt_engage_start",
         });
+        add_or_refresh_active(ctx.engage_target->track_id, ctx.interceptor->interceptor_id);
+        const size_t active_index = active_index_for_track(ctx.engage_target->track_id);
+        if (active_index < memory_.active_engagements.size()) {
+          memory_.active_engagements[active_index].last_command_time_s = ctx.snapshot.time_s;
+        }
         ctx.result.mode = MissionMode::Engage;
         ctx.result.event =
-            event_for_track(*ctx.engage_target, "engage", "safety_checks_passed");
+            event_for_track(*ctx.engage_target, "engage", "engage_start");
+        record_event(ctx, "engage_start", ctx.engage_target->track_id,
+                     ctx.interceptor->interceptor_id, "safety_checks_passed");
+        if (metrics_ != nullptr) {
+          metrics_->inc("bt_engage_start_total");
+        }
         return Status::Success;
       },
       [&]() {
@@ -338,7 +748,18 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) const {
   const Status root_status = root.tick();
   record(ctx, "root.selector", root_status, mission_mode_to_string(ctx.result.mode));
 
-  return ctx.result;
+  if (ctx.result.event.decision_type == "engage_denied") {
+    memory_.last_denied_track_id = ctx.result.event.track_id;
+    memory_.last_denial_reason = ctx.result.event.reason;
+    memory_.denial_cooldown_until_s =
+        ctx.snapshot.time_s + std::max(0.0, config_.denial_cooldown_s);
+  }
+
+  if (ctx.result.mode != MissionMode::Engage) {
+    memory_.consecutive_engage_ticks = 0;
+  }
+
+  return finalize(ctx.result.mode);
 }
 
 const char* bt_status_to_string(Status status) {

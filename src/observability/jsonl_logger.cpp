@@ -441,6 +441,22 @@ std::string serialize_bt_decision_json(const sensor_fusion::Timestamp& t,
       << "\"decision_type\":\"" << result.event.decision_type << "\","
       << "\"reason\":\"" << result.event.reason << "\","
       << "\"engagement_commands\":" << result.engagement_commands.size() << ","
+      << "\"active_engagements\":" << result.active_engagement_count << ","
+      << "\"idle_interceptors\":" << result.idle_interceptor_count << ","
+      << "\"events\":[";
+  for (size_t i = 0; i < result.events.size(); ++i) {
+    if (i > 0) {
+      out << ",";
+    }
+    const auto& event = result.events[i];
+    out << "{"
+        << "\"event\":\"" << event.event << "\","
+        << "\"track_id\":" << event.track_id.value << ","
+        << "\"interceptor_id\":" << event.interceptor_id << ","
+        << "\"reason\":\"" << event.reason << "\""
+        << "}";
+  }
+  out << "],"
       << "\"nodes\":[";
   for (size_t i = 0; i < result.node_trace.size(); ++i) {
     if (i > 0) {

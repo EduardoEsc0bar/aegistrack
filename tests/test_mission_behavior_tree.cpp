@@ -4,6 +4,7 @@
 
 #include "decision/mission_behavior_tree.h"
 #include "observability/jsonl_logger.h"
+#include "observability/metrics.h"
 
 namespace sensor_fusion::decision {
 namespace {
@@ -33,6 +34,19 @@ InterceptorFact available_interceptor() {
   };
 }
 
+InterceptorFact interceptor_fact(uint64_t interceptor_id,
+                                 bool available,
+                                 bool engaged,
+                                 sensor_fusion::TrackId target_id) {
+  return InterceptorFact{
+      .interceptor_id = interceptor_id,
+      .available = available,
+      .engaged = engaged,
+      .target_id = target_id,
+      .position = {0.0, 0.0, 0.0},
+  };
+}
+
 }  // namespace
 
 TEST_CASE("mission behavior tree: no tracks enters search") {
@@ -57,6 +71,9 @@ TEST_CASE("mission behavior tree: target appears then tracks then engages") {
       .min_confidence_to_engage = 0.6,
       .no_engage_zone_radius_m = 0.0,
       .engagement_timeout_s = 10.0,
+      .denial_cooldown_s = 0.35,
+      .stable_track_ticks_to_engage = 1,
+      .retask_priority_margin = 0.15,
   });
 
   blackboard.set_tick(1, 0.05);
@@ -77,7 +94,7 @@ TEST_CASE("mission behavior tree: target appears then tracks then engages") {
   result = tree.tick(blackboard);
   CHECK(result.mode == MissionMode::Engage);
   CHECK(result.event.decision_type == "engage");
-  REQUIRE(result.engagement_commands.size() == 1);
+  CHECK(result.engagement_commands.size() == 1);
   CHECK(result.engagement_commands[0].interceptor_id == 1);
   CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(10));
   CHECK(blackboard.snapshot().engagement.active);
@@ -98,13 +115,268 @@ TEST_CASE("mission behavior tree: active engagement is maintained without duplic
   }});
   blackboard.set_engagement(1, sensor_fusion::TrackId(10));
 
-  MissionBehaviorTree tree(DecisionConfig{});
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  });
   const BtTickResult result = tree.tick(blackboard);
 
   CHECK(result.mode == MissionMode::Engage);
-  CHECK(result.event.decision_type == "engage");
+  CHECK(result.event.decision_type == "engage_maintain");
   CHECK(result.event.reason == "engagement_active");
   CHECK(result.engagement_commands.empty());
+}
+
+TEST_CASE("mission behavior tree: idle interceptor engages second stable target") {
+  MissionBlackboard blackboard;
+  sensor_fusion::observability::Metrics metrics;
+  MissionBehaviorTree tree(DecisionConfig{
+      .engage_score_threshold = 3.0,
+      .max_engagement_range_m = 5000.0,
+      .min_confidence_to_engage = 0.6,
+      .no_engage_zone_radius_m = 0.0,
+      .engagement_timeout_s = 10.0,
+      .denial_cooldown_s = 0.35,
+      .stable_track_ticks_to_engage = 1,
+      .retask_priority_margin = 0.15,
+  },
+      &metrics);
+
+  blackboard.set_engagement(1, sensor_fusion::TrackId(10));
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({
+      make_fact(sensor_fusion::TrackId(10),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.8),
+      make_fact(sensor_fusion::TrackId(11),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.7),
+  });
+  blackboard.set_interceptors({
+      interceptor_fact(1, false, true, sensor_fusion::TrackId(10)),
+      interceptor_fact(2, true, false, sensor_fusion::TrackId(0)),
+  });
+
+  const BtTickResult result = tree.tick(blackboard);
+
+  CHECK(result.mode == MissionMode::Engage);
+  CHECK(result.engagement_commands.size() == 1);
+  if (!result.engagement_commands.empty()) {
+    CHECK(result.engagement_commands[0].interceptor_id == 2);
+    CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(11));
+    CHECK(result.engagement_commands[0].reason == "bt_idle_interceptor_engage");
+  }
+  CHECK(result.active_engagement_count == 2);
+  CHECK(metrics.snapshot().counters.at("bt_idle_interceptor_engage_total") == 1);
+}
+
+TEST_CASE("mission behavior tree: retask is avoided when idle interceptor can engage") {
+  MissionBlackboard blackboard;
+  MissionBehaviorTree tree(DecisionConfig{
+      .engage_score_threshold = 3.0,
+      .max_engagement_range_m = 5000.0,
+      .min_confidence_to_engage = 0.6,
+      .no_engage_zone_radius_m = 0.0,
+      .engagement_timeout_s = 10.0,
+      .denial_cooldown_s = 0.35,
+      .stable_track_ticks_to_engage = 1,
+      .retask_priority_margin = 0.15,
+  });
+
+  blackboard.set_engagement(1, sensor_fusion::TrackId(20));
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({
+      make_fact(sensor_fusion::TrackId(20),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.6),
+      make_fact(sensor_fusion::TrackId(21),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.9),
+  });
+  blackboard.set_interceptors({
+      interceptor_fact(1, false, true, sensor_fusion::TrackId(20)),
+      interceptor_fact(2, true, false, sensor_fusion::TrackId(0)),
+  });
+
+  const BtTickResult result = tree.tick(blackboard);
+
+  CHECK(result.engagement_commands.size() == 1);
+  if (!result.engagement_commands.empty()) {
+    CHECK(result.engagement_commands[0].interceptor_id == 2);
+    CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(21));
+  }
+  bool retask_approved = false;
+  for (const auto& event : result.events) {
+    if (event.event == "retask_approved") {
+      retask_approved = true;
+    }
+  }
+  CHECK(!retask_approved);
+}
+
+TEST_CASE("mission behavior tree: duplicate assignment suppression is counted") {
+  MissionBlackboard blackboard;
+  sensor_fusion::observability::Metrics metrics;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  },
+      &metrics);
+
+  blackboard.set_engagement(1, sensor_fusion::TrackId(30));
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(30),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                                   0.9)});
+  blackboard.set_interceptors({interceptor_fact(1, false, true, sensor_fusion::TrackId(30))});
+
+  const BtTickResult result = tree.tick(blackboard);
+
+  CHECK(result.engagement_commands.empty());
+  CHECK(metrics.snapshot().counters.at("bt_duplicate_assignment_suppressed_total") == 1);
+}
+
+TEST_CASE("mission behavior tree: denial cooldown prevents repeated denial spam") {
+  MissionBlackboard blackboard;
+  sensor_fusion::observability::Metrics metrics;
+  MissionBehaviorTree tree(DecisionConfig{
+      .engage_score_threshold = 3.0,
+      .max_engagement_range_m = 5000.0,
+      .min_confidence_to_engage = 0.6,
+      .no_engage_zone_radius_m = 0.0,
+      .engagement_timeout_s = 10.0,
+      .denial_cooldown_s = 0.5,
+      .stable_track_ticks_to_engage = 1,
+      .retask_priority_margin = 0.15,
+  },
+      &metrics);
+
+  blackboard.set_tick(1, 0.10);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(20),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.2, 4.0,
+                                   0.9)});
+  blackboard.set_interceptors({available_interceptor()});
+  BtTickResult result = tree.tick(blackboard);
+  CHECK(result.event.decision_type == "engage_denied");
+  CHECK(result.event.reason == "low_confidence");
+
+  blackboard.set_tick(2, 0.20);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(20),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.2, 4.0,
+                                   0.9)});
+  result = tree.tick(blackboard);
+  CHECK(result.mode == MissionMode::Track);
+  CHECK(result.event.decision_type == "track");
+  CHECK(result.event.reason == "engage_cooldown");
+  CHECK(result.engagement_commands.empty());
+  CHECK(metrics.snapshot().counters.at("bt_engage_cooldown_total") == 1);
+}
+
+TEST_CASE("mission behavior tree: engagement waits for required stable ticks") {
+  MissionBlackboard blackboard;
+  MissionBehaviorTree tree(DecisionConfig{
+      .engage_score_threshold = 3.0,
+      .max_engagement_range_m = 5000.0,
+      .min_confidence_to_engage = 0.6,
+      .no_engage_zone_radius_m = 0.0,
+      .engagement_timeout_s = 10.0,
+      .denial_cooldown_s = 0.35,
+      .stable_track_ticks_to_engage = 2,
+      .retask_priority_margin = 0.15,
+  });
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(30),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                                   0.9)});
+  blackboard.set_interceptors({available_interceptor()});
+  BtTickResult result = tree.tick(blackboard);
+  CHECK(result.mode == MissionMode::Track);
+  CHECK(result.engagement_commands.empty());
+
+  blackboard.set_tick(2, 0.10);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(30),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                                   0.9)});
+  result = tree.tick(blackboard);
+  CHECK(result.mode == MissionMode::Engage);
+  CHECK(result.engagement_commands.size() == 1);
+  CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(30));
+}
+
+TEST_CASE("mission behavior tree: retask only occurs when priority margin is exceeded") {
+  MissionBlackboard blackboard;
+  MissionBehaviorTree tree(DecisionConfig{
+      .engage_score_threshold = 3.0,
+      .max_engagement_range_m = 5000.0,
+      .min_confidence_to_engage = 0.6,
+      .no_engage_zone_radius_m = 0.0,
+      .engagement_timeout_s = 10.0,
+      .denial_cooldown_s = 0.35,
+      .stable_track_ticks_to_engage = 3,
+      .retask_priority_margin = 0.15,
+  });
+
+  blackboard.set_engagement(1, sensor_fusion::TrackId(40));
+  blackboard.set_interceptors({InterceptorFact{
+      .interceptor_id = 1,
+      .available = false,
+      .engaged = true,
+      .target_id = sensor_fusion::TrackId(40),
+      .position = {0.0, 0.0, 0.0},
+  }});
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({
+      make_fact(sensor_fusion::TrackId(40),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.70),
+      make_fact(sensor_fusion::TrackId(41),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.80),
+  });
+  BtTickResult result = tree.tick(blackboard);
+  CHECK(result.engagement_commands.empty());
+  CHECK(result.event.reason == "retask_denied");
+
+  blackboard.set_tick(2, 0.10);
+  blackboard.set_tracks({
+      make_fact(sensor_fusion::TrackId(40),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.70),
+      make_fact(sensor_fusion::TrackId(41),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.90),
+  });
+  result = tree.tick(blackboard);
+  CHECK(result.engagement_commands.empty());
+
+  blackboard.set_tick(3, 0.15);
+  blackboard.set_tracks({
+      make_fact(sensor_fusion::TrackId(40),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.70),
+      make_fact(sensor_fusion::TrackId(41),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.90),
+  });
+  result = tree.tick(blackboard);
+  CHECK(result.engagement_commands.size() == 1);
+  CHECK(result.engagement_commands[0].interceptor_id == 1);
+  CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(41));
+  CHECK(result.event.reason == "retask_approved");
+}
+
+TEST_CASE("mission behavior tree: mode transitions are recorded") {
+  MissionBlackboard blackboard;
+  sensor_fusion::observability::Metrics metrics;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  },
+      &metrics);
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_interceptors({available_interceptor()});
+  BtTickResult result = tree.tick(blackboard);
+  CHECK(result.mode == MissionMode::Search);
+
+  blackboard.set_tick(2, 0.10);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(50),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                                   0.9)});
+  result = tree.tick(blackboard);
+  CHECK(result.mode == MissionMode::Engage);
+  CHECK(metrics.snapshot().counters.at("bt_mode_transition_total") == 1);
+  CHECK(!result.events.empty());
+  CHECK(result.events.back().event == "mode_transition");
 }
 
 TEST_CASE("mission behavior tree: degraded sensor denies engagement") {
@@ -121,7 +393,9 @@ TEST_CASE("mission behavior tree: degraded sensor denies engagement") {
       .last_seen_age_s = 3.0,
   }});
 
-  MissionBehaviorTree tree(DecisionConfig{});
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  });
   const BtTickResult result = tree.tick(blackboard);
 
   CHECK(result.mode == MissionMode::Track);
@@ -138,13 +412,19 @@ TEST_CASE("mission behavior tree: JSONL logging includes node outcomes") {
                                    0.9)});
   blackboard.set_interceptors({available_interceptor()});
 
-  MissionBehaviorTree tree(DecisionConfig{});
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  });
   const BtTickResult result = tree.tick(blackboard);
   const std::string line = sensor_fusion::observability::serialize_bt_decision_json(
       sensor_fusion::Timestamp::from_seconds(0.20), result, 99, 0);
 
   CHECK(line.find("\"type\":\"bt_decision\"") != std::string::npos);
   CHECK(line.find("\"mode\":\"engage\"") != std::string::npos);
+  CHECK(line.find("\"active_engagements\":1") != std::string::npos);
+  CHECK(line.find("\"idle_interceptors\":0") != std::string::npos);
+  CHECK(line.find("\"events\"") != std::string::npos);
+  CHECK(line.find("\"event\":\"engage_start\"") != std::string::npos);
   CHECK(line.find("\"node\":\"engage.target_ready\"") != std::string::npos);
 }
 
