@@ -1,3 +1,4 @@
+#include <cmath>
 #include <vector>
 
 #include <doctest/doctest.h>
@@ -39,14 +40,14 @@ TEST_CASE("blackboard: stores deterministic track and interceptor snapshots") {
 
   const auto snapshot = blackboard.snapshot();
   CHECK(snapshot.tick == 42);
-  CHECK(snapshot.time_s == doctest::Approx(2.1));
+  CHECK(std::abs(snapshot.time_s - 2.1) < 1e-12);
   CHECK(snapshot.tracks.size() == 2);
   CHECK(snapshot.tracks[0].track_id == sensor_fusion::TrackId(1));
   CHECK(snapshot.interceptors.size() == 1);
   CHECK(snapshot.interceptors[0].interceptor_id == 7);
 
   const auto selected = select_highest_priority_track(snapshot, true);
-  REQUIRE(selected.has_value());
+  CHECK(selected.has_value());
   CHECK(selected->track_id == sensor_fusion::TrackId(1));
 }
 
@@ -68,6 +69,23 @@ TEST_CASE("blackboard: sensor stale health is visible to behavior tree") {
   });
 
   CHECK(has_stale_required_sensor(blackboard.snapshot()));
+}
+
+TEST_CASE("blackboard: interceptor facts include measured speed") {
+  MissionBlackboard blackboard;
+  blackboard.set_interceptors_from_states({
+      sensor_fusion::agents::InterceptorState{
+          .interceptor_id = 3,
+          .position = {0.0, 0.0, 0.0},
+          .velocity = {3.0, 4.0, 0.0},
+          .engaged = true,
+          .target_id = sensor_fusion::TrackId(9),
+      },
+  });
+
+  const auto snapshot = blackboard.snapshot();
+  CHECK(snapshot.interceptors.size() == 1);
+  CHECK(std::abs(snapshot.interceptors[0].speed_mps - 5.0) < 1e-12);
 }
 
 }  // namespace sensor_fusion::decision

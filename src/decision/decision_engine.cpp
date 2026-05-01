@@ -47,7 +47,9 @@ DecisionEvent DecisionEngine::decide(
       .position = {0.0, 0.0, 0.0},
   }});
 
-  MissionBehaviorTree tree(config_);
+  DecisionConfig single_tick_config = config_;
+  single_tick_config.stable_track_ticks_to_engage = 1;
+  MissionBehaviorTree tree(single_tick_config);
   const BtTickResult result = tree.tick(blackboard);
   for (const auto& command : result.engagement_commands) {
     assign_action(command.track_id, command.target_position);

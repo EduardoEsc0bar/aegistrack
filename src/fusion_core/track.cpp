@@ -30,6 +30,7 @@ const sensor_fusion::EkfCv& Track::filter() const {
 void Track::mark_radar_hit(double measurement_confidence, uint64_t trace_id) {
   ++q_.age_ticks;
   ++q_.hits;
+  q_.misses = 0;
   q_.score += 1.0;
   const double clamped_confidence = std::clamp(measurement_confidence, 0.0, 1.0);
   if (q_.hits == 1 && q_.misses == 0) {

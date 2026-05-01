@@ -29,6 +29,7 @@ struct InterceptorFact {
   bool engaged = false;
   sensor_fusion::TrackId target_id{0};
   std::array<double, 3> position{0.0, 0.0, 0.0};
+  double speed_mps = 0.0;
 };
 
 struct SensorHealthFact {

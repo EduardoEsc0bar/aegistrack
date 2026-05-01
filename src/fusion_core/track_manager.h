@@ -33,6 +33,7 @@ struct TrackManagerConfig {
   double gate_mahal_eoir = 9.21;
   uint32_t confirm_hits = 3;
   uint32_t delete_misses = 5;
+  uint32_t confirmed_delete_misses = 10;
   double init_pos_var = 1000.0;
   double init_vel_var = 1000.0;
   bool use_hungarian = true;

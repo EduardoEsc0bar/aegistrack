@@ -263,6 +263,114 @@ TEST_CASE("mission behavior tree: duplicate assignment suppression is counted") 
   CHECK(metrics.snapshot().counters.at("bt_duplicate_assignment_suppressed_total") == 1);
 }
 
+TEST_CASE("mission behavior tree: reconciliation removes missing track engagement") {
+  MissionBlackboard blackboard;
+  sensor_fusion::observability::Metrics metrics;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  },
+      &metrics);
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(70),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                                   0.9)});
+  blackboard.set_interceptors({available_interceptor()});
+  BtTickResult result = tree.tick(blackboard);
+  CHECK(result.engagement_commands.size() == 1);
+
+  blackboard.set_tick(2, 0.10);
+  blackboard.set_tracks({});
+  blackboard.set_interceptors({interceptor_fact(1, false, true, sensor_fusion::TrackId(70))});
+  result = tree.tick(blackboard);
+
+  CHECK(result.reconciliation_removals == 1);
+  CHECK(result.active_engagement_count_after_reconcile == 0);
+  CHECK(result.active_engagement_count == 0);
+  CHECK(metrics.snapshot().counters.at("bt_disengage_track_missing_total") == 1);
+}
+
+TEST_CASE("mission behavior tree: reconciliation removes idle interceptor engagement") {
+  MissionBlackboard blackboard;
+  sensor_fusion::observability::Metrics metrics;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  },
+      &metrics);
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(71),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                                   0.9)});
+  blackboard.set_interceptors({available_interceptor()});
+  BtTickResult result = tree.tick(blackboard);
+  CHECK(result.engagement_commands.size() == 1);
+
+  blackboard.set_tick(2, 0.10);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(71),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 1.0,
+                                   0.9)});
+  blackboard.set_interceptors({available_interceptor()});
+  result = tree.tick(blackboard);
+
+  CHECK(result.reconciliation_removals == 1);
+  CHECK(result.active_engagement_count_after_reconcile == 0);
+  CHECK(result.active_engagement_count == 0);
+  CHECK(metrics.snapshot().counters.at("bt_disengage_interceptor_idle_total") == 1);
+}
+
+TEST_CASE("mission behavior tree: reconciliation removes retargeted interceptor engagement") {
+  MissionBlackboard blackboard;
+  sensor_fusion::observability::Metrics metrics;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  },
+      &metrics);
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(72),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                                   0.9)});
+  blackboard.set_interceptors({available_interceptor()});
+  BtTickResult result = tree.tick(blackboard);
+  CHECK(result.engagement_commands.size() == 1);
+
+  blackboard.set_tick(2, 0.10);
+  blackboard.set_tracks({
+      make_fact(sensor_fusion::TrackId(72),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.8),
+      make_fact(sensor_fusion::TrackId(73),
+                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.9),
+  });
+  blackboard.set_interceptors({interceptor_fact(1, false, true, sensor_fusion::TrackId(73))});
+  result = tree.tick(blackboard);
+
+  CHECK(result.reconciliation_removals == 1);
+  CHECK(result.active_engagement_count_after_reconcile == 1);
+  CHECK(result.active_engagement_count == 1);
+  CHECK(metrics.snapshot().counters.at("bt_disengage_interceptor_retargeted_total") == 1);
+}
+
+TEST_CASE("mission behavior tree: reconciliation retains agreed engagement") {
+  MissionBlackboard blackboard;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  });
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_engagement(1, sensor_fusion::TrackId(74));
+  blackboard.set_tracks({make_fact(sensor_fusion::TrackId(74),
+                                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                                   0.9)});
+  blackboard.set_interceptors({interceptor_fact(1, false, true, sensor_fusion::TrackId(74))});
+  const BtTickResult result = tree.tick(blackboard);
+
+  CHECK(result.reconciliation_removals == 0);
+  CHECK(result.active_engagement_count_after_reconcile == 1);
+  CHECK(result.active_engagement_count == 1);
+  CHECK(result.engagement_commands.empty());
+}
+
 TEST_CASE("mission behavior tree: closer target wins when priorities are similar") {
   MissionBlackboard blackboard;
   MissionBehaviorTree tree(DecisionConfig{
@@ -356,6 +464,28 @@ TEST_CASE("mission behavior tree: engagement scoring is deterministic") {
   CHECK(std::abs(first.score - second.score) < 1e-12);
   CHECK(std::abs(first.estimated_intercept_time_s -
                  second.estimated_intercept_time_s) < 1e-12);
+}
+
+TEST_CASE("mission behavior tree: engagement scoring uses interceptor speed with fallback") {
+  const TrackFact track =
+      make_fact_at(sensor_fusion::TrackId(67),
+                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                   0.9, {1000.0, 0.0, 0.0});
+  InterceptorFact interceptor =
+      interceptor_fact_at(1, true, false, sensor_fusion::TrackId(0),
+                          {0.0, 0.0, 0.0});
+  EngagementScoringConfig config;
+  config.default_interceptor_speed_mps = 100.0;
+
+  interceptor.speed_mps = 200.0;
+  const EngagementScore measured_speed_score =
+      score_engagement_pair(track, interceptor, config, false);
+  interceptor.speed_mps = 0.0;
+  const EngagementScore fallback_score =
+      score_engagement_pair(track, interceptor, config, false);
+
+  CHECK(std::abs(measured_speed_score.estimated_intercept_time_s - 5.0) < 1e-12);
+  CHECK(std::abs(fallback_score.estimated_intercept_time_s - 10.0) < 1e-12);
 }
 
 TEST_CASE("mission behavior tree: denial cooldown prevents repeated denial spam") {
@@ -543,6 +673,9 @@ TEST_CASE("mission behavior tree: JSONL logging includes node outcomes") {
   CHECK(line.find("\"mode\":\"engage\"") != std::string::npos);
   CHECK(line.find("\"active_engagements\":1") != std::string::npos);
   CHECK(line.find("\"idle_interceptors\":0") != std::string::npos);
+  CHECK(line.find("\"reconciliation_removals\":0") != std::string::npos);
+  CHECK(line.find("\"active_engagements_after_reconcile\":0") !=
+        std::string::npos);
   CHECK(line.find("\"selected_track_id\":12") != std::string::npos);
   CHECK(line.find("\"selected_interceptor_id\":1") != std::string::npos);
   CHECK(line.find("\"assignment_reason\":\"intercept_aware_idle_assignment\"") !=

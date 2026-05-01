@@ -169,6 +169,24 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
     });
   };
 
+  auto find_track_any_status = [&](sensor_fusion::TrackId track_id) -> std::optional<TrackFact> {
+    for (const auto& track : ctx.snapshot.tracks) {
+      if (track.track_id == track_id) {
+        return track;
+      }
+    }
+    return std::nullopt;
+  };
+
+  auto find_interceptor = [&](uint64_t interceptor_id) -> std::optional<InterceptorFact> {
+    for (const auto& interceptor : ctx.snapshot.interceptors) {
+      if (interceptor.interceptor_id == interceptor_id) {
+        return interceptor;
+      }
+    }
+    return std::nullopt;
+  };
+
   if (ctx.snapshot.engagement.active) {
     add_or_refresh_active(ctx.snapshot.engagement.track_id,
                           ctx.snapshot.engagement.interceptor_id);
@@ -177,6 +195,72 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
     if (interceptor.engaged && interceptor.target_id.value != 0) {
       add_or_refresh_active(interceptor.target_id, interceptor.interceptor_id);
     }
+  }
+
+  auto record_reconciled_engagement = [&](const MissionMemory::ActiveEngagement& active,
+                                          const std::string& reason) {
+    ++ctx.result.reconciliation_removals;
+    record_event(ctx, "disengage", active.track_id, active.interceptor_id, reason);
+    if (metrics_ != nullptr) {
+      metrics_->inc("bt_engagement_reconciled_total");
+      metrics_->inc("bt_stale_engagement_removed_total");
+      if (reason == "track_missing") {
+        metrics_->inc("bt_disengage_track_missing_total");
+      } else if (reason == "track_deleted") {
+        metrics_->inc("bt_disengage_track_deleted_total");
+      } else if (reason == "interceptor_missing") {
+        metrics_->inc("bt_disengage_interceptor_missing_total");
+      } else if (reason == "interceptor_idle") {
+        metrics_->inc("bt_disengage_interceptor_idle_total");
+      } else if (reason == "interceptor_retargeted") {
+        metrics_->inc("bt_disengage_interceptor_retargeted_total");
+      } else if (reason == "completed_or_killed") {
+        metrics_->inc("bt_disengage_completed_or_killed_total");
+      } else {
+        metrics_->inc("bt_disengage_stale_engagement_total");
+      }
+    }
+  };
+
+  std::vector<MissionMemory::ActiveEngagement> reconciled_engagements;
+  reconciled_engagements.reserve(memory_.active_engagements.size());
+  for (const auto& active : memory_.active_engagements) {
+    const auto track = find_track_any_status(active.track_id);
+    const auto interceptor = find_interceptor(active.interceptor_id);
+    std::string removal_reason;
+    if (!track.has_value()) {
+      removal_reason = interceptor.has_value() && !interceptor->engaged
+                           ? "completed_or_killed"
+                           : "track_missing";
+    } else if (track->status == sensor_fusion::fusion_core::TrackStatus::Deleted) {
+      removal_reason = interceptor.has_value() && !interceptor->engaged
+                           ? "completed_or_killed"
+                           : "track_deleted";
+    } else if (!interceptor.has_value()) {
+      removal_reason = "interceptor_missing";
+    } else if (!interceptor->engaged || interceptor->target_id.value == 0) {
+      removal_reason = "interceptor_idle";
+    } else if (interceptor->target_id != active.track_id) {
+      removal_reason = "interceptor_retargeted";
+    }
+
+    if (!removal_reason.empty()) {
+      record_reconciled_engagement(active, removal_reason);
+      if (ctx.snapshot.engagement.active &&
+          ctx.snapshot.engagement.track_id == active.track_id &&
+          ctx.snapshot.engagement.interceptor_id == active.interceptor_id) {
+        blackboard.clear_engagement();
+      }
+      continue;
+    }
+    reconciled_engagements.push_back(active);
+  }
+  memory_.active_engagements = std::move(reconciled_engagements);
+  ctx.result.active_engagement_count_after_reconcile =
+      static_cast<uint32_t>(memory_.active_engagements.size());
+  if (metrics_ != nullptr) {
+    metrics_->set_gauge("bt_active_engagements_after_reconcile",
+                        static_cast<double>(memory_.active_engagements.size()));
   }
 
   std::vector<MissionMemory::TrackStability> next_stability;
@@ -252,15 +336,6 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
                         const InterceptorFact& interceptor,
                         bool already_engaged) {
     return score_engagement_pair(track, interceptor, scoring_config, already_engaged);
-  };
-
-  auto find_interceptor = [&](uint64_t interceptor_id) -> std::optional<InterceptorFact> {
-    for (const auto& interceptor : ctx.snapshot.interceptors) {
-      if (interceptor.interceptor_id == interceptor_id) {
-        return interceptor;
-      }
-    }
-    return std::nullopt;
   };
 
   const auto best_confirmed = select_highest_priority_track(ctx.snapshot, true);

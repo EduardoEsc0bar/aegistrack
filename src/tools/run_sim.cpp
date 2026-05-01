@@ -54,6 +54,7 @@ struct CliOptions {
   double eoir_sigma_elevation_deg = 1.0;
   uint32_t confirm_hits = 3;
   uint32_t delete_misses = 5;
+  uint32_t confirmed_delete_misses = 10;
   double gate_mahal = 9.21;
   int use_hungarian = 1;
   int enable_eoir_updates = 1;
@@ -68,6 +69,9 @@ struct CliOptions {
   double min_confidence_to_engage = 0.6;
   double no_engage_zone_radius_m = 0.0;
   double engagement_timeout_s = 10.0;
+  double bt_denial_cooldown_s = 0.35;
+  uint32_t bt_stable_track_ticks_to_engage = 2;
+  double bt_retask_priority_margin = 0.15;
   int metrics_dump_every = 20;
   int enable_logging = 1;
   std::string log_path = "logs/run.jsonl";
@@ -147,6 +151,8 @@ CliOptions parse_args(int argc, char** argv) {
       options.confirm_hits = static_cast<uint32_t>(std::stoul(argv[++i]));
     } else if (arg == "--delete_misses" && i + 1 < argc) {
       options.delete_misses = static_cast<uint32_t>(std::stoul(argv[++i]));
+    } else if (arg == "--confirmed_delete_misses" && i + 1 < argc) {
+      options.confirmed_delete_misses = static_cast<uint32_t>(std::stoul(argv[++i]));
     } else if (arg == "--gate_mahal" && i + 1 < argc) {
       options.gate_mahal = std::stod(argv[++i]);
     } else if (arg == "--use_hungarian" && i + 1 < argc) {
@@ -175,6 +181,12 @@ CliOptions parse_args(int argc, char** argv) {
       options.no_engage_zone_radius_m = std::stod(argv[++i]);
     } else if (arg == "--engagement_timeout_s" && i + 1 < argc) {
       options.engagement_timeout_s = std::stod(argv[++i]);
+    } else if (arg == "--bt_denial_cooldown_s" && i + 1 < argc) {
+      options.bt_denial_cooldown_s = std::stod(argv[++i]);
+    } else if (arg == "--bt_stable_track_ticks_to_engage" && i + 1 < argc) {
+      options.bt_stable_track_ticks_to_engage = static_cast<uint32_t>(std::stoul(argv[++i]));
+    } else if (arg == "--bt_retask_priority_margin" && i + 1 < argc) {
+      options.bt_retask_priority_margin = std::stod(argv[++i]);
     } else if (arg == "--metrics_dump_every" && i + 1 < argc) {
       options.metrics_dump_every = std::stoi(argv[++i]);
     } else if (arg == "--enable_logging" && i + 1 < argc) {
@@ -348,6 +360,7 @@ int main(int argc, char** argv) {
           .gate_mahal_eoir = options.gate_mahal,
           .confirm_hits = options.confirm_hits,
           .delete_misses = options.delete_misses,
+          .confirmed_delete_misses = options.confirmed_delete_misses,
           .init_pos_var = 1000.0,
           .init_vel_var = 1000.0,
           .use_hungarian = options.use_hungarian != 0,
@@ -356,13 +369,18 @@ int main(int argc, char** argv) {
       },
       &metrics);
 
-  sensor_fusion::decision::MissionBehaviorTree mission_tree(sensor_fusion::decision::DecisionConfig{
-      .engage_score_threshold = options.engage_score_threshold,
-      .max_engagement_range_m = options.max_engagement_range_m,
-      .min_confidence_to_engage = options.min_confidence_to_engage,
-      .no_engage_zone_radius_m = options.no_engage_zone_radius_m,
-      .engagement_timeout_s = options.engagement_timeout_s,
-  });
+  sensor_fusion::decision::MissionBehaviorTree mission_tree(
+      sensor_fusion::decision::DecisionConfig{
+          .engage_score_threshold = options.engage_score_threshold,
+          .max_engagement_range_m = options.max_engagement_range_m,
+          .min_confidence_to_engage = options.min_confidence_to_engage,
+          .no_engage_zone_radius_m = options.no_engage_zone_radius_m,
+          .engagement_timeout_s = options.engagement_timeout_s,
+          .denial_cooldown_s = options.bt_denial_cooldown_s,
+          .stable_track_ticks_to_engage = options.bt_stable_track_ticks_to_engage,
+          .retask_priority_margin = options.bt_retask_priority_margin,
+      },
+      &metrics);
   sensor_fusion::decision::MissionBlackboard mission_blackboard;
   std::vector<sensor_fusion::decision::SensorHealthFact> sensor_health = {
       sensor_fusion::decision::SensorHealthFact{
@@ -556,7 +574,7 @@ int main(int argc, char** argv) {
       }
       emit_line(event_time,
                 sensor_fusion::observability::serialize_track_stability_event_json(
-                    event_time, "track_fragmentation_warning", *created_it,
+                    event_time, "track_reacquisition_candidate", *created_it,
                     "new_track_near_recent_deleted_confirmed_track", warning.original_track_id,
                     warning.distance_m, alloc_trace_id(), 0));
     }

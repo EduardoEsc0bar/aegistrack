@@ -37,7 +37,10 @@ inline EngagementScore score_engagement_pair(const TrackFact& track,
                                              const EngagementScoringConfig& config,
                                              bool already_engaged) {
   const double distance = distance_m(track.position, interceptor.position);
-  const double speed = std::max(config.default_interceptor_speed_mps, 1.0);
+  const double configured_speed = interceptor.speed_mps > 0.0
+                                      ? interceptor.speed_mps
+                                      : config.default_interceptor_speed_mps;
+  const double speed = std::max(configured_speed, 1.0);
   const double estimated_intercept_time_s = distance / speed;
   const double normalized_distance =
       distance / std::max(config.distance_normalizer_m, 1.0);

@@ -90,6 +90,12 @@ void observe_gate_metric(sensor_fusion::observability::Metrics* metrics,
 TrackManager::TrackManager(TrackManagerConfig cfg,
                            sensor_fusion::observability::Metrics* metrics)
     : cfg_(cfg), metrics_(metrics) {
+  if (metrics_ != nullptr) {
+    metrics_->set_gauge("tentative_track_deletion_threshold",
+                        static_cast<double>(cfg_.delete_misses));
+    metrics_->set_gauge("confirmed_track_deletion_threshold",
+                        static_cast<double>(cfg_.confirmed_delete_misses));
+  }
 #if defined(AEGISTRACK_REALTIME)
   tracks_.reserve(256);
   last_tick_deltas_.created.reserve(64);
@@ -196,6 +202,9 @@ std::vector<Track> TrackManager::update_with_measurements(
       if (metrics_ != nullptr) {
         metrics_->inc("track_coasts_total");
         metrics_->observe("track_coast_misses", static_cast<double>(tracks_[i].quality().misses));
+        if (tracks_[i].status() == TrackStatus::Confirmed) {
+          metrics_->inc("confirmed_track_coast_ticks");
+        }
       }
     }
   }
@@ -397,6 +406,7 @@ void TrackManager::record_fragmentation_warning_if_needed(const Track& created) 
     if (metrics_ != nullptr) {
       metrics_->inc("track_fragmentation_warnings_total");
       metrics_->inc("possible_id_switch_total");
+      metrics_->inc("reacquisition_candidates_total");
       metrics_->observe("track_fragmentation_distance_m", distance_m);
     }
     return;
@@ -507,7 +517,10 @@ std::vector<std::pair<size_t, size_t>> TrackManager::associate_hungarian(
 
 void TrackManager::apply_lifecycle_rules() {
   for (auto& track : tracks_) {
-    if (track.quality().misses >= cfg_.delete_misses) {
+    const uint32_t delete_threshold =
+        track.status() == TrackStatus::Confirmed ? cfg_.confirmed_delete_misses
+                                                 : cfg_.delete_misses;
+    if (track.quality().misses >= delete_threshold) {
       const bool was_confirmed = track.status() == TrackStatus::Confirmed;
       track.set_status(TrackStatus::Deleted);
       last_tick_deltas_.deleted.push_back(track);

@@ -1,6 +1,7 @@
 #include "decision/blackboard.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace sensor_fusion::decision {
 
@@ -41,6 +42,9 @@ void MissionBlackboard::set_interceptors_from_states(
         .engaged = state.engaged,
         .target_id = state.target_id,
         .position = state.position,
+        .speed_mps = std::sqrt(state.velocity[0] * state.velocity[0] +
+                               state.velocity[1] * state.velocity[1] +
+                               state.velocity[2] * state.velocity[2]),
     });
   }
   set_interceptors(std::move(facts));

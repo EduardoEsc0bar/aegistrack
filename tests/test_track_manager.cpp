@@ -75,6 +75,61 @@ TEST_CASE("track manager: deletes after misses") {
   CHECK(manager.tracks().empty());
 }
 
+TEST_CASE("track manager: confirmed tracks survive short missed-update windows") {
+  TrackManagerConfig cfg;
+  cfg.confirm_hits = 1;
+  cfg.delete_misses = 2;
+  cfg.confirmed_delete_misses = 5;
+  sensor_fusion::observability::Metrics metrics;
+  TrackManager manager(cfg, &metrics);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0)});
+  CHECK(manager.tracks().size() == 1);
+  CHECK(manager.tracks()[0].status() == TrackStatus::Confirmed);
+
+  for (uint32_t i = 0; i < cfg.delete_misses; ++i) {
+    manager.predict_all(0.1);
+    manager.update_with_measurements({});
+  }
+
+  CHECK(manager.tracks().size() == 1);
+  CHECK(manager.tracks()[0].status() == TrackStatus::Confirmed);
+  CHECK(manager.tracks()[0].quality().misses == cfg.delete_misses);
+
+  const auto snapshot = metrics.snapshot();
+  CHECK(std::abs(snapshot.gauges.at("tentative_track_deletion_threshold") - 2.0) < 1e-12);
+  CHECK(std::abs(snapshot.gauges.at("confirmed_track_deletion_threshold") - 5.0) < 1e-12);
+  CHECK(snapshot.counters.at("confirmed_track_coast_ticks") == 2);
+
+  for (uint32_t i = cfg.delete_misses; i < cfg.confirmed_delete_misses; ++i) {
+    manager.predict_all(0.1);
+    manager.update_with_measurements({});
+  }
+
+  CHECK(manager.tracks().empty());
+}
+
+TEST_CASE("track manager: tentative tracks still use strict deletion threshold") {
+  TrackManagerConfig cfg;
+  cfg.confirm_hits = 3;
+  cfg.delete_misses = 2;
+  cfg.confirmed_delete_misses = 5;
+  TrackManager manager(cfg);
+
+  manager.predict_all(0.1);
+  manager.update_with_measurements({make_meas(100.0, 0.0)});
+  CHECK(manager.tracks().size() == 1);
+  CHECK(manager.tracks()[0].status() == TrackStatus::Tentative);
+
+  for (uint32_t i = 0; i < cfg.delete_misses; ++i) {
+    manager.predict_all(0.1);
+    manager.update_with_measurements({});
+  }
+
+  CHECK(manager.tracks().empty());
+}
+
 TEST_CASE("track manager: lifetime and deletion metrics are recorded") {
   TrackManagerConfig cfg;
   cfg.delete_misses = 2;
@@ -92,15 +147,16 @@ TEST_CASE("track manager: lifetime and deletion metrics are recorded") {
   const auto snapshot = metrics.snapshot();
   CHECK(snapshot.counters.at("tracks_deleted_total") == 1);
   CHECK(snapshot.counters.at("track_coasts_total") == 2);
-  REQUIRE(snapshot.observations.count("track_lifetime_ticks") == 1);
+  CHECK(snapshot.observations.count("track_lifetime_ticks") == 1);
   CHECK(snapshot.observations.at("track_lifetime_ticks").count == 1);
-  CHECK(snapshot.observations.at("track_lifetime_ticks").max == doctest::Approx(3.0));
+  CHECK(std::abs(snapshot.observations.at("track_lifetime_ticks").max - 3.0) < 1e-12);
 }
 
 TEST_CASE("track manager: fragmentation warning increments when new track replaces deleted track") {
   TrackManagerConfig cfg;
   cfg.confirm_hits = 1;
   cfg.delete_misses = 1;
+  cfg.confirmed_delete_misses = 1;
   cfg.fragmentation_warning_distance_m = 25.0;
   cfg.fragmentation_recent_delete_window_ticks = 3;
   sensor_fusion::observability::Metrics metrics;
@@ -108,7 +164,7 @@ TEST_CASE("track manager: fragmentation warning increments when new track replac
 
   manager.predict_all(0.1);
   manager.update_with_measurements({make_meas(100.0, 0.0)});
-  REQUIRE(manager.tracks().size() == 1);
+  CHECK(manager.tracks().size() == 1);
   CHECK(manager.tracks()[0].status() == TrackStatus::Confirmed);
 
   manager.predict_all(0.1);
@@ -119,11 +175,12 @@ TEST_CASE("track manager: fragmentation warning increments when new track replac
   manager.update_with_measurements({make_meas(101.0, 0.0)});
 
   const auto& deltas = manager.last_deltas();
-  REQUIRE(deltas.fragmentation_warnings.size() == 1);
+  CHECK(deltas.fragmentation_warnings.size() == 1);
   CHECK(deltas.fragmentation_warnings[0].new_track_id == sensor_fusion::TrackId(2));
   const auto snapshot = metrics.snapshot();
   CHECK(snapshot.counters.at("track_fragmentation_warnings_total") == 1);
   CHECK(snapshot.counters.at("possible_id_switch_total") == 1);
+  CHECK(snapshot.counters.at("reacquisition_candidates_total") == 1);
 }
 
 TEST_CASE("track manager: gating rejects bad measurement") {
@@ -157,8 +214,8 @@ TEST_CASE("track manager: accepted and rejected association mahalanobis metrics 
   manager.update_with_measurements({make_meas(300.0, deg_to_rad(90.0), 0.9, 0.01, 0.0001)});
 
   const auto snapshot = metrics.snapshot();
-  REQUIRE(snapshot.observations.count("assoc_accepted_mahalanobis2") == 1);
-  REQUIRE(snapshot.observations.count("assoc_rejected_mahalanobis2") == 1);
+  CHECK(snapshot.observations.count("assoc_accepted_mahalanobis2") == 1);
+  CHECK(snapshot.observations.count("assoc_rejected_mahalanobis2") == 1);
   CHECK(snapshot.observations.at("assoc_accepted_mahalanobis2").count >= 1);
   CHECK(snapshot.observations.at("assoc_rejected_mahalanobis2").count >= 1);
   CHECK(snapshot.counters.at("assoc_gated_out_measurements") >= 1);
@@ -168,7 +225,7 @@ TEST_CASE("track stability JSONL includes compact lifecycle fields") {
   TrackManager manager(TrackManagerConfig{});
   manager.predict_all(0.1);
   manager.update_with_measurements({make_meas(100.0, 0.0)});
-  REQUIRE(manager.tracks().size() == 1);
+  CHECK(manager.tracks().size() == 1);
 
   const std::string line =
       sensor_fusion::observability::serialize_track_stability_event_json(

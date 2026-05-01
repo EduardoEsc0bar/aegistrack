@@ -44,6 +44,8 @@ struct BtTickResult {
   DecisionEvent event;
   uint32_t active_engagement_count = 0;
   uint32_t idle_interceptor_count = 0;
+  uint32_t reconciliation_removals = 0;
+  uint32_t active_engagement_count_after_reconcile = 0;
   sensor_fusion::TrackId selected_track_id{0};
   uint64_t selected_interceptor_id = 0;
   double selected_engagement_score = 0.0;
