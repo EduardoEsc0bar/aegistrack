@@ -1,6 +1,7 @@
 #include "decision/mission_behavior_tree.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <memory>
 #include <optional>
@@ -9,6 +10,7 @@
 
 #include "decision/action.h"
 #include "decision/condition.h"
+#include "decision/engagement_scoring.h"
 #include "decision/selector.h"
 #include "decision/sequence.h"
 #include "observability/metrics.h"
@@ -237,6 +239,30 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
     return track_is_stable(track.track_id);
   };
 
+  const EngagementScoringConfig scoring_config{
+      .priority_weight = config_.engagement_priority_weight,
+      .confidence_weight = config_.engagement_confidence_weight,
+      .intercept_time_weight = config_.engagement_intercept_time_weight,
+      .distance_weight = config_.engagement_distance_weight,
+      .distance_normalizer_m = config_.engagement_distance_normalizer_m,
+      .default_interceptor_speed_mps = config_.default_interceptor_speed_mps,
+  };
+
+  auto score_pair = [&](const TrackFact& track,
+                        const InterceptorFact& interceptor,
+                        bool already_engaged) {
+    return score_engagement_pair(track, interceptor, scoring_config, already_engaged);
+  };
+
+  auto find_interceptor = [&](uint64_t interceptor_id) -> std::optional<InterceptorFact> {
+    for (const auto& interceptor : ctx.snapshot.interceptors) {
+      if (interceptor.interceptor_id == interceptor_id) {
+        return interceptor;
+      }
+    }
+    return std::nullopt;
+  };
+
   const auto best_confirmed = select_highest_priority_track(ctx.snapshot, true);
   if (best_confirmed.has_value()) {
     memory_.stable_track_id = best_confirmed->track_id;
@@ -331,16 +357,55 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
     }
   }
 
-  for (const auto& track : ctx.snapshot.tracks) {
-    if (idle_interceptors.empty()) {
+  while (!idle_interceptors.empty()) {
+    struct AssignmentCandidate {
+      size_t interceptor_index = 0;
+      size_t track_index = 0;
+      EngagementScore score;
+    };
+    std::optional<AssignmentCandidate> best_candidate;
+    for (size_t interceptor_index = 0; interceptor_index < idle_interceptors.size();
+         ++interceptor_index) {
+      for (size_t track_index = 0; track_index < ctx.snapshot.tracks.size();
+           ++track_index) {
+        const auto& track = ctx.snapshot.tracks[track_index];
+        if (track_is_engaged(track.track_id) || !track_is_engageable(track)) {
+          continue;
+        }
+        const EngagementScore score =
+            score_pair(track, idle_interceptors[interceptor_index], false);
+        if (metrics_ != nullptr) {
+          metrics_->inc("bt_candidate_engagement_pairs");
+          metrics_->observe("bt_engagement_score", score.score);
+          metrics_->observe("bt_estimated_intercept_time_s",
+                            score.estimated_intercept_time_s);
+        }
+        if (!std::isfinite(score.score) ||
+            !std::isfinite(score.estimated_intercept_time_s)) {
+          if (metrics_ != nullptr) {
+            metrics_->inc("bt_intercept_time_rejected_total");
+          }
+          continue;
+        }
+        if (!best_candidate.has_value() ||
+            score.score > best_candidate->score.score) {
+          best_candidate = AssignmentCandidate{
+              .interceptor_index = interceptor_index,
+              .track_index = track_index,
+              .score = score,
+          };
+        }
+      }
+    }
+    if (!best_candidate.has_value()) {
       break;
     }
-    if (track_is_engaged(track.track_id) || !track_is_engageable(track)) {
-      continue;
-    }
 
-    const auto interceptor = idle_interceptors.front();
-    idle_interceptors.erase(idle_interceptors.begin());
+    const auto interceptor = idle_interceptors[best_candidate->interceptor_index];
+    const auto track = ctx.snapshot.tracks[best_candidate->track_index];
+    const EngagementScore selected_score = best_candidate->score;
+    idle_interceptors.erase(idle_interceptors.begin() +
+                            static_cast<std::ptrdiff_t>(best_candidate->interceptor_index));
     const bool already_had_engagement = !memory_.active_engagements.empty();
     const std::string event_name =
         already_had_engagement ? "idle_interceptor_engage" : "engage_start";
@@ -352,9 +417,16 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
         .interceptor_id = interceptor.interceptor_id,
         .track_id = track.track_id,
         .target_position = track.position,
-        .reason = already_had_engagement ? "bt_idle_interceptor_engage"
-                                          : "bt_engage_start",
+        .reason = "intercept_aware_idle_assignment",
     });
+    if (ctx.result.assignment_reason.empty()) {
+      ctx.result.selected_track_id = track.track_id;
+      ctx.result.selected_interceptor_id = interceptor.interceptor_id;
+      ctx.result.selected_engagement_score = selected_score.score;
+      ctx.result.selected_estimated_intercept_time_s =
+          selected_score.estimated_intercept_time_s;
+      ctx.result.assignment_reason = "intercept_aware_idle_assignment";
+    }
     memory_.active_engagements.push_back(MissionMemory::ActiveEngagement{
         .track_id = track.track_id,
         .interceptor_id = interceptor.interceptor_id,
@@ -364,9 +436,13 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
     blackboard.set_engagement(interceptor.interceptor_id, track.track_id);
     ctx.result.event = event_for_track(track, "engage", event_name);
     record_event(ctx, event_name, track.track_id, interceptor.interceptor_id,
-                 "idle_interceptor_available");
+                 "intercept_aware_idle_assignment");
     if (metrics_ != nullptr) {
       metrics_->inc("bt_engage_start_total");
+      metrics_->inc("bt_intercept_aware_assignment_total");
+      metrics_->observe("bt_selected_engagement_score", selected_score.score);
+      metrics_->observe("bt_selected_estimated_intercept_time_s",
+                        selected_score.estimated_intercept_time_s);
       if (already_had_engagement) {
         metrics_->inc("bt_idle_interceptor_engage_total");
         metrics_->inc("bt_multi_engagement_total");
@@ -382,63 +458,108 @@ BtTickResult MissionBehaviorTree::tick(MissionBlackboard& blackboard) {
 
   if (maintained_engagement) {
     if (idle_interceptors.empty()) {
-      std::optional<TrackFact> retask_candidate;
-      for (const auto& track : ctx.snapshot.tracks) {
-        if (!track_is_engaged(track.track_id) && track_is_engageable(track)) {
-          retask_candidate = track;
-          break;
+      struct RetaskCandidate {
+        size_t active_index = 0;
+        TrackFact candidate_track;
+        EngagementScore candidate_score;
+        EngagementScore active_score;
+      };
+      std::optional<RetaskCandidate> retask_candidate;
+      for (size_t active_index = 0; active_index < memory_.active_engagements.size();
+           ++active_index) {
+        const auto active_track =
+            find_track(ctx.snapshot, memory_.active_engagements[active_index].track_id);
+        const auto interceptor =
+            find_interceptor(memory_.active_engagements[active_index].interceptor_id);
+        if (!active_track.has_value() || !interceptor.has_value()) {
+          continue;
+        }
+        const EngagementScore active_score = score_pair(*active_track, *interceptor, false);
+        for (const auto& track : ctx.snapshot.tracks) {
+          if (track_is_engaged(track.track_id) || !track_is_engageable(track)) {
+            continue;
+          }
+          const EngagementScore candidate_score = score_pair(track, *interceptor, false);
+          if (metrics_ != nullptr) {
+            metrics_->inc("bt_candidate_engagement_pairs");
+            metrics_->observe("bt_engagement_score", candidate_score.score);
+            metrics_->observe("bt_estimated_intercept_time_s",
+                              candidate_score.estimated_intercept_time_s);
+          }
+          if (!std::isfinite(candidate_score.score) ||
+              !std::isfinite(candidate_score.estimated_intercept_time_s)) {
+            if (metrics_ != nullptr) {
+              metrics_->inc("bt_intercept_time_rejected_total");
+            }
+            continue;
+          }
+          const bool better_than_current_best =
+              !retask_candidate.has_value() ||
+              candidate_score.score - active_score.score >
+                  retask_candidate->candidate_score.score -
+                      retask_candidate->active_score.score;
+          if (better_than_current_best) {
+            retask_candidate = RetaskCandidate{
+                .active_index = active_index,
+                .candidate_track = track,
+                .candidate_score = candidate_score,
+                .active_score = active_score,
+            };
+          }
         }
       }
       if (retask_candidate.has_value() && !memory_.active_engagements.empty()) {
-        size_t weakest_index = memory_.active_engagements.size();
-        double weakest_priority = 0.0;
-        for (size_t i = 0; i < memory_.active_engagements.size(); ++i) {
-          const auto active_track = find_track(ctx.snapshot,
-                                               memory_.active_engagements[i].track_id);
-          if (!active_track.has_value()) {
-            continue;
-          }
-          if (weakest_index == memory_.active_engagements.size() ||
-              active_track->priority < weakest_priority) {
-            weakest_index = i;
-            weakest_priority = active_track->priority;
-          }
-        }
-        if (weakest_index < memory_.active_engagements.size() &&
-            retask_candidate->priority >= weakest_priority + config_.retask_priority_margin) {
-          auto& active = memory_.active_engagements[weakest_index];
+        const double score_delta =
+            retask_candidate->candidate_score.score - retask_candidate->active_score.score;
+        if (score_delta >= config_.retask_engagement_score_margin) {
+          auto& active = memory_.active_engagements[retask_candidate->active_index];
           const uint64_t interceptor_id = active.interceptor_id;
           ctx.result.engagement_commands.push_back(EngagementCommand{
               .interceptor_id = interceptor_id,
-              .track_id = retask_candidate->track_id,
-              .target_position = retask_candidate->position,
-              .reason = "bt_retask_priority_margin",
+              .track_id = retask_candidate->candidate_track.track_id,
+              .target_position = retask_candidate->candidate_track.position,
+              .reason = "intercept_aware_retask",
           });
-          active.track_id = retask_candidate->track_id;
+          ctx.result.selected_track_id = retask_candidate->candidate_track.track_id;
+          ctx.result.selected_interceptor_id = interceptor_id;
+          ctx.result.selected_engagement_score = retask_candidate->candidate_score.score;
+          ctx.result.selected_estimated_intercept_time_s =
+              retask_candidate->candidate_score.estimated_intercept_time_s;
+          ctx.result.assignment_reason = "intercept_aware_retask";
+          active.track_id = retask_candidate->candidate_track.track_id;
           active.engagement_start_time_s = ctx.snapshot.time_s;
           active.last_command_time_s = ctx.snapshot.time_s;
           active.missing_ticks = 0;
           active.low_confidence_ticks = 0;
-          blackboard.set_engagement(interceptor_id, retask_candidate->track_id);
-          ctx.result.event =
-              event_for_track(*retask_candidate, "engage", "retask_approved");
+          blackboard.set_engagement(interceptor_id,
+                                    retask_candidate->candidate_track.track_id);
+          ctx.result.event = event_for_track(retask_candidate->candidate_track, "engage",
+                                             "retask_approved");
           record(ctx, "engage.retask_policy", Status::Success, "retask_approved");
-          record_event(ctx, "retask_approved", retask_candidate->track_id,
-                       interceptor_id, "priority_margin_exceeded");
+          record_event(ctx, "retask_approved",
+                       retask_candidate->candidate_track.track_id, interceptor_id,
+                       "engagement_score_margin_exceeded");
           if (metrics_ != nullptr) {
             metrics_->inc("bt_retask_approved_total");
+            metrics_->inc("bt_intercept_aware_assignment_total");
+            metrics_->observe("bt_selected_engagement_score",
+                              retask_candidate->candidate_score.score);
+            metrics_->observe("bt_selected_estimated_intercept_time_s",
+                              retask_candidate->candidate_score
+                                  .estimated_intercept_time_s);
           }
           ++memory_.consecutive_engage_ticks;
           return finalize(MissionMode::Engage);
         }
         record(ctx, "engage.retask_policy", Status::Failure,
-               "priority_margin_not_exceeded");
-        record_event(ctx, "retask_denied", retask_candidate->track_id, 0,
-                     "priority_margin_not_exceeded");
+               "engagement_score_margin_not_exceeded");
+        record_event(ctx, "retask_denied",
+                     retask_candidate->candidate_track.track_id, 0,
+                     "engagement_score_margin_not_exceeded");
         if (metrics_ != nullptr) {
           metrics_->inc("bt_retask_denied_total");
         }
-        ctx.result.event.track_id = retask_candidate->track_id;
+        ctx.result.event.track_id = retask_candidate->candidate_track.track_id;
         ctx.result.event.reason = "retask_denied";
       }
     } else if (has_stable_unengaged_target && metrics_ != nullptr) {

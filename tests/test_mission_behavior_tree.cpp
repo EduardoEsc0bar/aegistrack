@@ -1,7 +1,10 @@
+#include <array>
+#include <cmath>
 #include <string>
 
 #include <doctest/doctest.h>
 
+#include "decision/engagement_scoring.h"
 #include "decision/mission_behavior_tree.h"
 #include "observability/jsonl_logger.h"
 #include "observability/metrics.h"
@@ -18,6 +21,22 @@ TrackFact make_fact(sensor_fusion::TrackId id,
       .track_id = id,
       .status = status,
       .position = {100.0, 0.0, 0.0},
+      .confidence = confidence,
+      .score = score,
+      .priority = priority,
+  };
+}
+
+TrackFact make_fact_at(sensor_fusion::TrackId id,
+                       sensor_fusion::fusion_core::TrackStatus status,
+                       double confidence,
+                       double score,
+                       double priority,
+                       std::array<double, 3> position) {
+  return TrackFact{
+      .track_id = id,
+      .status = status,
+      .position = position,
       .confidence = confidence,
       .score = score,
       .priority = priority,
@@ -44,6 +63,20 @@ InterceptorFact interceptor_fact(uint64_t interceptor_id,
       .engaged = engaged,
       .target_id = target_id,
       .position = {0.0, 0.0, 0.0},
+  };
+}
+
+InterceptorFact interceptor_fact_at(uint64_t interceptor_id,
+                                    bool available,
+                                    bool engaged,
+                                    sensor_fusion::TrackId target_id,
+                                    std::array<double, 3> position) {
+  return InterceptorFact{
+      .interceptor_id = interceptor_id,
+      .available = available,
+      .engaged = engaged,
+      .target_id = target_id,
+      .position = position,
   };
 }
 
@@ -161,7 +194,7 @@ TEST_CASE("mission behavior tree: idle interceptor engages second stable target"
   if (!result.engagement_commands.empty()) {
     CHECK(result.engagement_commands[0].interceptor_id == 2);
     CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(11));
-    CHECK(result.engagement_commands[0].reason == "bt_idle_interceptor_engage");
+    CHECK(result.engagement_commands[0].reason == "intercept_aware_idle_assignment");
   }
   CHECK(result.active_engagement_count == 2);
   CHECK(metrics.snapshot().counters.at("bt_idle_interceptor_engage_total") == 1);
@@ -228,6 +261,101 @@ TEST_CASE("mission behavior tree: duplicate assignment suppression is counted") 
 
   CHECK(result.engagement_commands.empty());
   CHECK(metrics.snapshot().counters.at("bt_duplicate_assignment_suppressed_total") == 1);
+}
+
+TEST_CASE("mission behavior tree: closer target wins when priorities are similar") {
+  MissionBlackboard blackboard;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  });
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({
+      make_fact_at(sensor_fusion::TrackId(60),
+                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                   0.70, {150.0, 0.0, 0.0}),
+      make_fact_at(sensor_fusion::TrackId(61),
+                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                   0.72, {4000.0, 0.0, 0.0}),
+  });
+  blackboard.set_interceptors({available_interceptor()});
+
+  const BtTickResult result = tree.tick(blackboard);
+
+  CHECK(result.engagement_commands.size() == 1);
+  CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(60));
+  CHECK(result.assignment_reason == "intercept_aware_idle_assignment");
+}
+
+TEST_CASE("mission behavior tree: high priority can beat closer target") {
+  MissionBlackboard blackboard;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  });
+
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({
+      make_fact_at(sensor_fusion::TrackId(62),
+                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                   0.50, {150.0, 0.0, 0.0}),
+      make_fact_at(sensor_fusion::TrackId(63),
+                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                   2.0, {4000.0, 0.0, 0.0}),
+  });
+  blackboard.set_interceptors({available_interceptor()});
+
+  const BtTickResult result = tree.tick(blackboard);
+
+  CHECK(result.engagement_commands.size() == 1);
+  CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(63));
+}
+
+TEST_CASE("mission behavior tree: already engaged target is skipped for idle assignment") {
+  MissionBlackboard blackboard;
+  MissionBehaviorTree tree(DecisionConfig{
+      .stable_track_ticks_to_engage = 1,
+  });
+
+  blackboard.set_engagement(1, sensor_fusion::TrackId(64));
+  blackboard.set_tick(1, 0.05);
+  blackboard.set_tracks({
+      make_fact_at(sensor_fusion::TrackId(64),
+                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                   2.0, {100.0, 0.0, 0.0}),
+      make_fact_at(sensor_fusion::TrackId(65),
+                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0,
+                   0.8, {250.0, 0.0, 0.0}),
+  });
+  blackboard.set_interceptors({
+      interceptor_fact(1, false, true, sensor_fusion::TrackId(64)),
+      interceptor_fact(2, true, false, sensor_fusion::TrackId(0)),
+  });
+
+  const BtTickResult result = tree.tick(blackboard);
+
+  CHECK(result.engagement_commands.size() == 1);
+  CHECK(result.engagement_commands[0].interceptor_id == 2);
+  CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(65));
+}
+
+TEST_CASE("mission behavior tree: engagement scoring is deterministic") {
+  const TrackFact track =
+      make_fact_at(sensor_fusion::TrackId(66),
+                   sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.91, 4.0,
+                   0.83, {700.0, 100.0, 0.0});
+  const InterceptorFact interceptor =
+      interceptor_fact_at(3, true, false, sensor_fusion::TrackId(0),
+                          {10.0, 25.0, 0.0});
+  const EngagementScoringConfig config;
+
+  const EngagementScore first =
+      score_engagement_pair(track, interceptor, config, false);
+  const EngagementScore second =
+      score_engagement_pair(track, interceptor, config, false);
+
+  CHECK(std::abs(first.score - second.score) < 1e-12);
+  CHECK(std::abs(first.estimated_intercept_time_s -
+                 second.estimated_intercept_time_s) < 1e-12);
 }
 
 TEST_CASE("mission behavior tree: denial cooldown prevents repeated denial spam") {
@@ -307,8 +435,9 @@ TEST_CASE("mission behavior tree: retask only occurs when priority margin is exc
       .no_engage_zone_radius_m = 0.0,
       .engagement_timeout_s = 10.0,
       .denial_cooldown_s = 0.35,
-      .stable_track_ticks_to_engage = 3,
+      .stable_track_ticks_to_engage = 1,
       .retask_priority_margin = 0.15,
+      .retask_engagement_score_margin = 0.15,
   });
 
   blackboard.set_engagement(1, sensor_fusion::TrackId(40));
@@ -339,20 +468,11 @@ TEST_CASE("mission behavior tree: retask only occurs when priority margin is exc
                 sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.90),
   });
   result = tree.tick(blackboard);
-  CHECK(result.engagement_commands.empty());
-
-  blackboard.set_tick(3, 0.15);
-  blackboard.set_tracks({
-      make_fact(sensor_fusion::TrackId(40),
-                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.70),
-      make_fact(sensor_fusion::TrackId(41),
-                sensor_fusion::fusion_core::TrackStatus::Confirmed, 0.95, 4.0, 0.90),
-  });
-  result = tree.tick(blackboard);
   CHECK(result.engagement_commands.size() == 1);
   CHECK(result.engagement_commands[0].interceptor_id == 1);
   CHECK(result.engagement_commands[0].track_id == sensor_fusion::TrackId(41));
   CHECK(result.event.reason == "retask_approved");
+  CHECK(result.assignment_reason == "intercept_aware_retask");
 }
 
 TEST_CASE("mission behavior tree: mode transitions are recorded") {
@@ -423,6 +543,10 @@ TEST_CASE("mission behavior tree: JSONL logging includes node outcomes") {
   CHECK(line.find("\"mode\":\"engage\"") != std::string::npos);
   CHECK(line.find("\"active_engagements\":1") != std::string::npos);
   CHECK(line.find("\"idle_interceptors\":0") != std::string::npos);
+  CHECK(line.find("\"selected_track_id\":12") != std::string::npos);
+  CHECK(line.find("\"selected_interceptor_id\":1") != std::string::npos);
+  CHECK(line.find("\"assignment_reason\":\"intercept_aware_idle_assignment\"") !=
+        std::string::npos);
   CHECK(line.find("\"events\"") != std::string::npos);
   CHECK(line.find("\"event\":\"engage_start\"") != std::string::npos);
   CHECK(line.find("\"node\":\"engage.target_ready\"") != std::string::npos);

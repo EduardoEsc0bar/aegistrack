@@ -443,6 +443,12 @@ std::string serialize_bt_decision_json(const sensor_fusion::Timestamp& t,
       << "\"engagement_commands\":" << result.engagement_commands.size() << ","
       << "\"active_engagements\":" << result.active_engagement_count << ","
       << "\"idle_interceptors\":" << result.idle_interceptor_count << ","
+      << "\"selected_track_id\":" << result.selected_track_id.value << ","
+      << "\"selected_interceptor_id\":" << result.selected_interceptor_id << ","
+      << "\"selected_engagement_score\":" << result.selected_engagement_score << ","
+      << "\"selected_estimated_intercept_time_s\":"
+      << result.selected_estimated_intercept_time_s << ","
+      << "\"assignment_reason\":\"" << result.assignment_reason << "\","
       << "\"events\":[";
   for (size_t i = 0; i < result.events.size(); ++i) {
     if (i > 0) {

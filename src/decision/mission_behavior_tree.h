@@ -44,6 +44,11 @@ struct BtTickResult {
   DecisionEvent event;
   uint32_t active_engagement_count = 0;
   uint32_t idle_interceptor_count = 0;
+  sensor_fusion::TrackId selected_track_id{0};
+  uint64_t selected_interceptor_id = 0;
+  double selected_engagement_score = 0.0;
+  double selected_estimated_intercept_time_s = 0.0;
+  std::string assignment_reason;
   std::vector<BtNodeTrace> node_trace;
   std::vector<BtEventTrace> events;
   std::vector<EngagementCommand> engagement_commands;

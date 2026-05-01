@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -14,6 +15,16 @@ struct DecisionConfig {
   double min_confidence_to_engage = 0.6;
   double no_engage_zone_radius_m = 0.0;
   double engagement_timeout_s = 10.0;
+  double denial_cooldown_s = 0.35;
+  uint32_t stable_track_ticks_to_engage = 2;
+  double retask_priority_margin = 0.15;
+  double engagement_priority_weight = 1.0;
+  double engagement_confidence_weight = 0.5;
+  double engagement_intercept_time_weight = 0.05;
+  double engagement_distance_weight = 0.05;
+  double engagement_distance_normalizer_m = 5000.0;
+  double default_interceptor_speed_mps = 150.0;
+  double retask_engagement_score_margin = 0.25;
 };
 
 struct DecisionEvent {
