@@ -12,11 +12,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install C++ dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            g++ \
+            libeigen3-dev \
+            libgrpc++-dev \
+            libprotobuf-dev \
+            protobuf-compiler \
+            protobuf-compiler-grpc
+
       - name: Configure (ASAN+UBSAN)
-        run: cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug -DAEGISTRACK_ASAN=ON -DAEGISTRACK_UBSAN=ON
+        run: cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug -DAEGISTRACK_ASAN=ON -DAEGISTRACK_UBSAN=ON -DAEGISTRACK_VIZ=OFF
 
       - name: Build
-        run: cmake --build build-sanitize -j
+        run: cmake --build build-sanitize -j2
 
       - name: Test
         run: ctest --test-dir build-sanitize --output-on-failure

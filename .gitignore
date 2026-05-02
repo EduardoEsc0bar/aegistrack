@@ -1,19 +1,47 @@
-build/
+# macOS / editor-local files
+.DS_Store
+**/.DS_Store
 .vscode/
-*.log
-results/
-logs/
+
+# C++ / CMake build outputs
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
 *.o
 *.a
 *.so
 *.dylib
+*.log
 
-# Generated files
-build/
+# Python local/runtime files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+apps/api/.venv/
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend dependencies and generated caches
+node_modules/
 apps/web/node_modules/
 apps/web/.next/
-apps/api/.venv/
-logs/
+apps/web/out/
+apps/web/coverage/
+apps/web/.turbo/
+apps/web/.vite/
+apps/web/public/cesium/
 
-.DS_Store
-**/.DS_Store
+# Generated simulator logs and result artifacts.
+# Keep README files trackable so proof expectations stay documented.
+logs/*
+!logs/README.md
+results/*
+!results/README.md

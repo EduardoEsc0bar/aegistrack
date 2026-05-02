@@ -1,18 +1,18 @@
 # AegisTrack
 
-Real-time C++20 sensor-fusion and mission-autonomy simulation with deterministic replay, behavior-tree decision logic, multi-target tracking, interceptor assignment, and a TypeScript Mission Replay Console.
+C++20 sensor-fusion and mission-autonomy simulation with deterministic replay, behavior-tree decision logic, multi-target tracking, interceptor assignment, telemetry diagnostics, and a TypeScript Mission Replay Console.
 
 ## Hero Screenshots
 
-Screenshots should be added manually after running the web console locally.
+Screenshots are pending manual capture from a local verified run. See `docs/images/README.md` for the capture checklist.
 
 ![AegisTrack Mission Replay Console](docs/images/aegistrack-replay-console.png)
 
-**Mission Replay Console:** TypeScript/Next.js frontend visualizing deterministic C++ JSONL replay data with tracks, interceptors, assignment lines, injected faults, intercepts, and behavior-tree decisions.
+**Pending:** Mission Replay Console screenshot showing TypeScript/Next.js visualization of JSONL replay data with tracks, interceptors, assignment lines, injected faults, intercepts, and behavior-tree decisions.
 
 ![AegisTrack Focus Mode](docs/images/aegistrack-focus-mode.png)
 
-**Focus Mode:** Screenshot-ready replay view centered on the tactical canvas and behavior-tree decision trace.
+**Pending:** Focus Mode screenshot centered on the tactical canvas and behavior-tree decision trace.
 
 ## Overview
 
@@ -20,11 +20,11 @@ AegisTrack is a simulation project for multi-sensor tracking and mission autonom
 
 On top of the simulation core, AegisTrack includes a behavior-tree autonomy layer with stateful mission memory, multi-engagement interceptor assignment, duplicate assignment suppression, and intercept-aware engagement scoring. A TypeScript Mission Replay Console visualizes replay logs as a scrub-able engineering dashboard.
 
-The project is intended to demonstrate real-time systems thinking, tracking diagnostics, replayability, and practical mission-autonomy tradeoffs. It is a simulation and diagnostics environment, not an operational defense system.
+The project is intended to demonstrate systems thinking, simulation timing diagnostics, replayability, and practical mission-autonomy tradeoffs. It is a simulation and diagnostics environment, not an operational defense system or production real-time controller.
 
 ## Key Features
 
-- C++20 real-time simulation loop using CMake.
+- C++20 deterministic simulation loop using CMake.
 - Radar and EO/IR sensor simulation.
 - Fault injection for measurement jitter and packet/drop behavior.
 - EKF-based multi-target tracking.
@@ -94,7 +94,7 @@ The console runs locally and does not require a live backend for the included sa
 
 ## Metrics and Results
 
-The numbers below are simulation-specific comparisons from recent tuning passes. They are useful for showing engineering tradeoffs across track stability, autonomy behavior, and engagement scoring; they are not general performance guarantees.
+The numbers below are simulation-specific comparisons from recent tuning passes. They are useful for showing engineering tradeoffs across track stability, autonomy behavior, and engagement scoring; they are not general performance guarantees. Regenerate benchmark/profile artifacts from the current revision before citing these numbers in a resume or interview.
 
 ### Tracking Stability
 
@@ -116,16 +116,16 @@ The numbers below are simulation-specific comparisons from recent tuning passes.
 
 Later reconciliation and hardening work also aligned `bt_active_engagements` with `interceptors_engaged` while preserving zero deadline misses in the measured scenario.
 
-## Example Runtime Output
+## Example Runtime Fields
 
-Example metrics block from a simulation run:
+Representative metric fields to look for after a local simulation/profile run:
 
 ```text
 deadline_misses=0
-successful_intercepts_total=8
-possible_id_switch_total=2
-track_fragmentation_warnings_total=2
-tracks_confirmed_avg_age_s=3.19
+successful_intercepts_total=<local run value>
+possible_id_switch_total=<local run value>
+track_fragmentation_warnings_total=<local run value>
+tracks_confirmed_avg_age_s=<local run value>
 ```
 
 ## Running Locally
@@ -133,7 +133,7 @@ tracks_confirmed_avg_age_s=3.19
 ### C++ Simulation
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DAEGISTRACK_VIZ=OFF
 cmake --build build -j1
 ./build/run_sim --confirmed_delete_misses 10
 ```
@@ -155,6 +155,148 @@ http://localhost:3000/timeline
 ```
 
 The Timeline page loads the included sample replay fixture and renders the Mission Replay Console without requiring a live backend.
+
+## Proof / Reproducibility
+
+Run these commands from the repository root unless noted otherwise. They are the commands that should back any resume or interview claim about the project.
+
+### Configure
+
+```bash
+cmake -S . -B build -DAEGISTRACK_VIZ=OFF
+```
+
+`AEGISTRACK_VIZ=OFF` keeps the core proof path independent of optional SFML visualization packages.
+
+### Build
+
+```bash
+cmake --build build -j1
+```
+
+Use `-j1` on low-memory machines. CI uses limited parallelism for the same reason.
+
+### Test
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+### Run Simulation and Generate Replay Log
+
+```bash
+./build/run_sim \
+  --enable_logging 1 \
+  --log_path logs/mission_control.jsonl \
+  --confirmed_delete_misses 10 \
+  --enable_viz 0
+```
+
+Output artifact: `logs/mission_control.jsonl`.
+
+### Run Replay
+
+```bash
+./build/run_replay --input logs/mission_control.jsonl
+```
+
+Output artifact: terminal track-state summary.
+
+### Run Benchmark
+
+```bash
+./build/run_bench --runs 5 --seed 1 --out_csv results/bench.csv
+```
+
+Output artifact: `results/bench.csv` plus terminal aggregate metrics.
+
+### Run Profile
+
+```bash
+./build/run_profile \
+  --config config/demo_radar_eoir.json \
+  --seed 1 \
+  --ticks 500 \
+  --out results/profile.json
+```
+
+Output artifact: `results/profile.json`.
+
+### Run Telemetry Load Test
+
+```bash
+./build/run_load_test \
+  --virtual_sensors 20 \
+  --hz 200 \
+  --duration_s 10 \
+  --queue_max 10000
+```
+
+Output artifact: terminal throughput, published/consumed, and queue-drop summary.
+
+### Run Frontend Replay Console
+
+```bash
+cd apps/web
+npm install
+npm test
+npm run dev
+```
+
+Then open `http://localhost:3000/timeline`.
+
+The web console uses the included replay fixture by default. To claim the screenshot reflects simulator output, regenerate a C++ JSONL log and wire that artifact into the demo flow before capture.
+
+### Verification Script
+
+```bash
+./scripts/verify_project.sh
+```
+
+The script runs configure, build, tests, and available smoke checks. It skips frontend checks when `apps/web/node_modules` is missing and does not install dependencies.
+
+## Resume Claims Supported By This Repo
+
+| Claim | Evidence file/module | Command to reproduce | Output artifact |
+| --- | --- | --- | --- |
+| C++20 deterministic sensor-fusion simulation with radar and EO/IR inputs | `src/tools/run_sim.cpp`, `src/sensors`, `src/scenario` | `./build/run_sim --enable_logging 1 --log_path logs/mission_control.jsonl --enable_viz 0` | `logs/mission_control.jsonl` and terminal metrics |
+| EKF-based multi-target tracking with Mahalanobis gating and association diagnostics | `src/fusion_core/ekf_cv.cpp`, `src/fusion_core/gating.cpp`, `src/fusion_core/track_manager.cpp`, `src/fusion_core/association` | `ctest --test-dir build --output-on-failure` | Passing C++ unit tests |
+| Track lifecycle diagnostics including confirmation, coasting, deletion, fragmentation, and possible ID-switch metrics | `src/fusion_core/track_manager.cpp`, `src/observability/metrics.cpp` | `./build/run_sim --confirmed_delete_misses 10 --enable_logging 1 --log_path logs/mission_control.jsonl` | Simulator metrics and JSONL replay events |
+| Behavior-tree mission autonomy with stateful engagement memory and assignment decisions | `src/decision/mission_behavior_tree.cpp`, `src/decision/blackboard.cpp`, `src/decision/assignment.cpp` | `ctest --test-dir build --output-on-failure` | Behavior-tree and assignment unit tests |
+| Intercept-aware engagement scoring and multi-interceptor assignment simulation | `src/decision/engagement_scoring.h`, `src/agents/interceptor`, `src/tools/run_sim.cpp` | `./build/run_sim --enable_interceptor 1 --interceptors 3 --enable_logging 1 --log_path logs/mission_control.jsonl` | Interceptor metrics and replay events |
+| Protobuf/gRPC telemetry ingest path with bounded queue and load-test diagnostics | `proto`, `src/services/telemetry_ingest`, `src/tools/run_load_test.cpp` | `./build/run_load_test --virtual_sensors 20 --hz 200 --duration_s 10 --queue_max 10000` | Terminal load-test summary |
+| Benchmark/profile tooling for timing, deadline, association, and queue-drop diagnostics | `src/tools/run_bench.cpp`, `src/tools/run_profile.cpp`, `src/tools/bench_harness.cpp` | `./build/run_bench --runs 5 --seed 1 --out_csv results/bench.csv` and `./build/run_profile --out results/profile.json` | `results/bench.csv`, `results/profile.json` |
+| TypeScript Mission Replay Console for scrub-able replay visualization | `apps/web/src/components/replay`, `apps/web/src/lib/replay`, `apps/web/src/store/replay-store.ts` | `cd apps/web && npm test && npm run dev` | `/timeline` local replay console |
+
+Do not cite benchmark numbers or test pass status unless the command was run successfully on the current revision.
+
+## Implemented vs Planned
+
+### Implemented
+
+- C++20 simulation targets for `run_sim`, `run_replay`, `run_bench`, `run_profile`, `run_load_test`, telemetry ingest, sensor node, cluster demo, incident replay, and tests.
+- Radar and EO/IR measurement simulation with deterministic RNG inputs.
+- Fault injection for drop/delay/jitter style degraded sensing.
+- EKF constant-velocity tracking, Mahalanobis gating, Hungarian/nearest-neighbor association paths, and track lifecycle diagnostics.
+- Behavior-tree mission autonomy, mission blackboard state, interceptor assignment, duplicate suppression, retask handling, and intercept-aware scoring.
+- Metrics, JSONL replay logging, benchmark/profile/load-test tools, and replay determinism tests.
+- Next.js/React/TypeScript Mission Replay Console for local replay visualization.
+- GitHub Actions workflows configured for C++ build/test, sanitizer build/test, and frontend replay/parser tests. Treat remote CI status as unverified until GitHub Actions runs on the current revision.
+
+### Optional Demos
+
+- SFML visualization when local SFML dependencies are available and `AEGISTRACK_VIZ=ON`.
+- Frontend screenshots and GIFs captured from a locally running replay console.
+- Generated replay artifacts under `logs/` and benchmark/profile artifacts under `results/`.
+
+### Planned / Future Upgrades
+
+- Live C++ to frontend bridge.
+- Richer radar and EO/IR sensor models.
+- More scenario configuration presets.
+- More realistic interceptor dynamics.
+- Advanced data association experiments.
+- Exportable replay reports for incidents and demonstrations.
 
 ## Replay Data
 
@@ -226,7 +368,6 @@ Naive assignment can engage the wrong target or leave interceptors poorly alloca
 - Live C++ to frontend bridge.
 - Richer radar and EO/IR sensor models.
 - More scenario configuration presets.
-- CI coverage for core simulation and web replay parser behavior.
 - More realistic interceptor dynamics.
 - Advanced data association experiments.
 - Exportable replay reports for incidents and demonstrations.
@@ -234,4 +375,4 @@ Naive assignment can engage the wrong target or leave interceptors poorly alloca
 
 ## Resume Summary
 
-AegisTrack is a C++20 real-time simulation and replay project covering sensor fusion, target tracking, mission autonomy, interceptor assignment, deterministic logging, metrics-driven tuning, and a TypeScript replay dashboard. It demonstrates practical engineering work across simulation, autonomy decision logic, diagnostics, and frontend visualization.
+AegisTrack is a C++20 simulation and replay project covering sensor fusion, target tracking, mission autonomy, interceptor assignment, deterministic logging, metrics-driven tuning, and a TypeScript replay dashboard. It demonstrates practical engineering work across simulation, autonomy decision logic, diagnostics, and frontend visualization.

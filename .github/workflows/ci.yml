@@ -5,18 +5,54 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
+  cpp-build-and-test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install C++ dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            g++ \
+            libeigen3-dev \
+            libgrpc++-dev \
+            libprotobuf-dev \
+            protobuf-compiler \
+            protobuf-compiler-grpc
+
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAEGISTRACK_VIZ=OFF
 
       - name: Build
-        run: cmake --build build -j
+        run: cmake --build build -j2
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  web-replay-tests:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run replay/parser tests
+        run: npm test
