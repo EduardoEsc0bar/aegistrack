@@ -45,3 +45,4 @@ logs/*
 !logs/README.md
 results/*
 !results/README.md
+.DS_Store
