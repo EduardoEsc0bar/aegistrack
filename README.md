@@ -6,7 +6,7 @@ C++20 sensor-fusion and mission-autonomy simulation with deterministic replay, b
 
 Screenshots are pending manual capture from a local verified run. See `docs/images/README.md` for the capture checklist.
 
-![AegisTrack Mission Replay Console](docs/images/aegistrack-replay-console.png)
+![AegisTrack Mission Replay Console](docs/images/aegistrack-end-to-end.png)
 
 **Pending:** Mission Replay Console screenshot showing TypeScript/Next.js visualization of JSONL replay data with tracks, interceptors, assignment lines, injected faults, intercepts, and behavior-tree decisions.
 
