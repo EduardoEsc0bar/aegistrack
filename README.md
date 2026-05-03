@@ -1,18 +1,17 @@
 # AegisTrack
 
-C++20 sensor-fusion and mission-autonomy simulation with deterministic replay, behavior-tree decision logic, multi-target tracking, interceptor assignment, telemetry diagnostics, and a TypeScript Mission Replay Console.
+<p align="center">
+  <img src="docs/images/aegistrack-end-to-end.png" alt="AegisTrack end-to-end verification and mission replay console" width="950"/>
+</p>
 
-## Hero Screenshots
+C++20 autonomous mission simulation with multi-sensor fusion (EKF), behavior-tree decision logic, deterministic replay, profiling, load testing, and a TypeScript Mission Replay Console.
 
-Screenshots are pending manual capture from a local verified run. See `docs/images/README.md` for the capture checklist.
+## End-to-End Verification
 
-![AegisTrack Mission Replay Console](docs/images/aegistrack-end-to-end.png)
-
-**Pending:** Mission Replay Console screenshot showing TypeScript/Next.js visualization of JSONL replay data with tracks, interceptors, assignment lines, injected faults, intercepts, and behavior-tree decisions.
-
-![AegisTrack Focus Mode](docs/images/aegistrack-focus-mode.png)
-
-**Pending:** Focus Mode screenshot centered on the tactical canvas and behavior-tree decision trace.
+- Single verification script covers build, tests, simulation, replay, benchmark, profile, load test, and frontend replay checks.
+- Profile smoke run completed with 0 deadline misses.
+- Telemetry load-test smoke run completed with 40/40 detections published/consumed and 0 ingest queue drops.
+- Frontend replay console tests passed: 2 test files, 10 tests.
 
 ## Overview
 
